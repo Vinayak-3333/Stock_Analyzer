@@ -11,6 +11,8 @@ import sys, os, json, sqlite3, logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
 
 # ── allow importing parent Analyzer.py ────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -134,6 +136,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Force no-cache on every API response — prevents browser from serving stale stock data
+class NoCacheMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: StarletteRequest, call_next):
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"]         = "no-cache"
+        response.headers["Expires"]        = "0"
+        return response
+
+app.add_middleware(NoCacheMiddleware)
 
 
 @app.on_event("startup")

@@ -349,10 +349,12 @@ export default function App() {
 
   const fetchAll = useCallback(async () => {
     try {
+      // Cache-busting: add timestamp so browser never serves stale HTTP-cached API response
+      const ts = Date.now()
       const [s, l, h] = await Promise.all([
-        axios.get(`${API}/status`),
-        axios.get(`${API}/latest`),
-        axios.get(`${API}/history?limit=30`),
+        axios.get(`${API}/status`,        { params: { _t: ts }, headers: { 'Cache-Control': 'no-cache' } }),
+        axios.get(`${API}/latest`,        { params: { _t: ts }, headers: { 'Cache-Control': 'no-cache' } }),
+        axios.get(`${API}/history?limit=30`, { params: { _t: ts }, headers: { 'Cache-Control': 'no-cache' } }),
       ])
       setBackendOff(false)
       setStatus(s.data)
@@ -386,13 +388,25 @@ export default function App() {
       setTriggering(false)
       return
     }
-    // Poll every 5s until the analysis_running flag goes false
+
+    // Wait 3s for the background task to actually start and set analysis_running=true
+    // (there's a race: POST returns before the task flips the flag)
+    await new Promise(resolve => setTimeout(resolve, 3000))
+    await fetchAll()  // first refresh
+
+    const startedAt = Date.now()
+    const MAX_POLL_MS = 20 * 60 * 1000  // 20 min safety net
+
+    // Poll every 5s until analysis_running goes false (run finished)
     const timer = setInterval(async () => {
       const s = await fetchAll()
-      if (s && !s.analysis_running) {
+      const elapsed = Date.now() - startedAt
+      if ((s && !s.analysis_running) || elapsed > MAX_POLL_MS) {
         clearInterval(timer)
         setPollTimer(null)
         setTriggering(false)
+        // Final fetch to get the fresh results
+        await fetchAll()
       }
     }, 5000)
     setPollTimer(timer)
