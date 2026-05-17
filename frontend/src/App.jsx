@@ -338,11 +338,13 @@ function ScoreDistChart({ results }) {
 
 // ── App ────────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [status,  setStatus]  = useState(null)
-  const [latest,  setLatest]  = useState(null)
-  const [history, setHistory] = useState([])
-  const [loading, setLoading] = useState(true)
+  const [status,    setStatus]    = useState(null)
+  const [latest,    setLatest]    = useState(null)
+  const [history,   setHistory]   = useState([])
+  const [loading,   setLoading]   = useState(true)
   const [triggering, setTriggering] = useState(false)
+  const [backendOff, setBackendOff] = useState(false)
+  const [pollTimer,  setPollTimer]  = useState(null)
   const [tab, setTab] = useState('signals')   // 'signals' | 'history'
 
   const fetchAll = useCallback(async () => {
@@ -352,11 +354,15 @@ export default function App() {
         axios.get(`${API}/latest`),
         axios.get(`${API}/history?limit=30`),
       ])
+      setBackendOff(false)
       setStatus(s.data)
       setLatest(l.data)
       setHistory(h.data)
+      return s.data   // return status so callers can inspect it
     } catch (e) {
-      console.error('Fetch failed', e)
+      setBackendOff(true)
+      console.error('Fetch failed — backend offline?', e)
+      return null
     } finally {
       setLoading(false)
     }
@@ -368,11 +374,28 @@ export default function App() {
     return () => clearInterval(t)
   }, [fetchAll])
 
+  // Clean up poll timer on unmount
+  useEffect(() => () => { if (pollTimer) clearInterval(pollTimer) }, [pollTimer])
+
   const triggerRun = async () => {
     setTriggering(true)
-    try { await axios.post(`${API}/trigger?email=true`) }
-    catch (e) { console.error(e) }
-    setTimeout(() => { setTriggering(false); fetchAll() }, 3000)
+    try {
+      await axios.post(`${API}/trigger?email=true`)
+    } catch (e) {
+      console.error('Trigger failed', e)
+      setTriggering(false)
+      return
+    }
+    // Poll every 5s until the analysis_running flag goes false
+    const timer = setInterval(async () => {
+      const s = await fetchAll()
+      if (s && !s.analysis_running) {
+        clearInterval(timer)
+        setPollTimer(null)
+        setTriggering(false)
+      }
+    }, 5000)
+    setPollTimer(timer)
   }
 
   const results = latest?.results || []
@@ -381,12 +404,29 @@ export default function App() {
   const sells   = results.filter(r => r.signal === 'SELL')
   const watches = results.filter(r => r.signal === 'WATCH')
 
-  const isRunning = status?.analysis_running
+  const isRunning = status?.analysis_running || triggering
   const mktTrend  = run?.market_trend || 'NEUTRAL'
   const lastTime  = run?.run_time ? new Date(run.run_time).toLocaleString('en-IN') : null
 
   return (
     <div className="app">
+      {/* Backend offline warning */}
+      {backendOff && (
+        <div style={{
+          background:'linear-gradient(90deg,#7f1d1d,#450a0a)',
+          color:'#fca5a5', padding:'10px 20px', fontSize:13,
+          display:'flex', alignItems:'center', gap:10,
+          borderBottom:'1px solid rgba(239,68,68,0.4)'
+        }}>
+          <AlertTriangle size={16}/>
+          <strong>Backend offline.</strong>&nbsp;Start the FastAPI server first:
+          <code style={{background:'rgba(0,0,0,0.4)',borderRadius:4,padding:'2px 8px',fontFamily:'var(--mono)',fontSize:12}}>
+            cd backend &amp;&amp; python -m uvicorn api:app --host 0.0.0.0 --port 8000
+          </code>
+          <span style={{marginLeft:'auto',opacity:0.7}}>or run <code style={{fontFamily:'var(--mono)'}}>start.bat</code></span>
+        </div>
+      )}
+
       {/* Header */}
       <header className="header">
         <div className="header-brand">
@@ -397,8 +437,8 @@ export default function App() {
         </div>
         <div className="header-right">
           {lastTime && <div className="last-update">Last run: {lastTime} IST</div>}
-          <button className="trigger-btn" onClick={triggerRun} disabled={isRunning || triggering}>
-            {isRunning || triggering
+          <button className="trigger-btn" onClick={triggerRun} disabled={isRunning || backendOff}>
+            {isRunning
               ? <><RefreshCw size={14} style={{animation:'spin 1s linear infinite'}}/> Running...</>
               : <><Zap size={14}/> Run Now</>}
           </button>
@@ -414,11 +454,22 @@ export default function App() {
           </div>
         )}
 
-        {!loading && !run && (
+        {!loading && !run && !isRunning && (
           <div className="empty">
             <div className="empty-icon">🚀</div>
             <div className="empty-msg">No analysis yet</div>
-            <div className="empty-sub">Click "Run Now" to start the first analysis. Scheduled runs happen at 09:15 & 15:30 IST on weekdays.</div>
+            <div className="empty-sub">Click "Run Now" to start the first analysis. Scheduled runs happen at 09:15 &amp; 15:30 IST on weekdays.</div>
+          </div>
+        )}
+
+        {!loading && !run && isRunning && (
+          <div className="empty">
+            <div className="empty-icon" style={{animation:'spin 2s linear infinite',display:'inline-block'}}>⚙️</div>
+            <div className="empty-msg">Analysis running…</div>
+            <div className="empty-sub">
+              Downloading market data and computing signals for all stocks.<br/>
+              This takes <strong>3–8 minutes</strong> — the dashboard will update automatically when done.
+            </div>
           </div>
         )}
 

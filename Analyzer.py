@@ -73,152 +73,208 @@ REQUIRE_PROMOTER_BUY = False
 ALERT_TIMES = ["09:15", "15:30"]
 
 # ─────────────────────────────────────────────
-# DYNAMIC WATCHLIST — Fetched from APIs
+# REAL-TIME DATA LAYER — NSE India + Groww APIs
 # ─────────────────────────────────────────────
 
-# Cache for watchlist (refreshed periodically)
-WATCHLIST_CACHE = {}
-CACHE_EXPIRY = 3600  # 1 hour in seconds
-LAST_CACHE_TIME = 0
+# Cache for watchlist + real-time quotes (refreshed every run)
+_WATCHLIST_CACHE: list = []
+_REALTIME_QUOTES: dict = {}    # {symbol: {lastPrice, open, high, low, ...}}
+_CACHE_EXPIRY = 3600           # 1 hour
+_LAST_CACHE_TIME = 0
 
-# NSE INDICES MAPPING (for dynamic stock fetching)
-NSE_INDICES = {
-    "NIFTY_50": {"name": "NIFTY 50", "min_stocks": 50},           # Large Cap
-    "NIFTY_MIDCAP_50": {"name": "NIFTY Midcap 50", "min_stocks": 50},  # Mid Cap
-    "NIFTY_SMALLCAP_50": {"name": "NIFTY Smallcap 50", "min_stocks": 50},  # Small Cap
-    "NIFTY_IT": {"name": "NIFTY IT", "min_stocks": 20},            # IT Sector
+# NSE Index name → API query param
+NSE_INDEX_MAP = {
+    "NIFTY 50":           "NIFTY%2050",
+    "NIFTY MIDCAP 50":    "NIFTY%20MIDCAP%2050",
+    "NIFTY SMLCAP 50":    "NIFTY%20SMLCAP%2050",
+    "NIFTY IT":           "NIFTY%20IT",
+    "NIFTY BANK":         "NIFTY%20BANK",
+    "NIFTY PHARMA":       "NIFTY%20PHARMA",
 }
 
-# Fallback static lists (used if API fails)
-FALLBACK_LARGE_CAP = [
+# Last-resort fallback (only used if ALL live APIs fail)
+_FALLBACK_SYMBOLS = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
     "HINDUNILVR.NS", "SBIN.NS", "BAJFINANCE.NS", "BHARTIARTL.NS", "ITC.NS",
     "KOTAKBANK.NS", "LT.NS", "HCLTECH.NS", "ASIANPAINT.NS", "AXISBANK.NS",
+    "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "ULTRACEMCO.NS", "WIPRO.NS",
+    "TECHM.NS", "NESTLEIND.NS", "M&M.NS", "POWERGRID.NS", "NTPC.NS",
+    "TATAMOTORS.NS", "JSWSTEEL.NS", "ADANIENT.NS", "ADANIPORTS.NS", "COALINDIA.NS",
 ]
 
-FALLBACK_WATCHLIST = list(set(FALLBACK_LARGE_CAP))
 
-
-def fetch_index_constituents(index_name):
+def _create_nse_session():
     """
-    Fetches stocks from NSE index using public APIs.
-    Index names: NIFTY_50, NIFTY_MIDCAP_50, NIFTY_SMALLCAP_50, NIFTY_IT
-    Returns list of NSE symbols with .NS suffix
+    Creates an HTTP session with NSE India, handling their cookie-based auth.
+    NSE blocks raw requests — you must warm up with a homepage visit first.
+    Returns a (session, success) tuple.
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept":          "*/*",
+        "Referer":         "https://www.nseindia.com/",
+        "Connection":      "keep-alive",
+    }
+    session = requests.Session()
+    session.headers.update(headers)
+
+    try:
+        # Warm-up: homepage sets required cookies
+        session.get("https://www.nseindia.com/", timeout=12)
+        time.sleep(0.5)
+        return session, True
+    except Exception as e:
+        print(f"  [NSE] Session warm-up failed: {e}")
+        return session, False
+
+
+def fetch_nse_index_quotes(session, index_query_param):
+    """
+    Fetches LIVE stock quotes for an NSE index using:
+        https://www.nseindia.com/api/equity-stockIndices?index=<INDEX>
+
+    Each stock entry contains real-time fields:
+        symbol, lastPrice, open, dayHigh, dayLow, previousClose,
+        change, pChange, totalTradedVolume, yearHigh, yearLow,
+        nearWKH, nearWKL, perChange365d, perChange30d, meta, ...
+
+    Returns list of stock dicts (raw NSE format), empty on failure.
+    """
+    url = f"https://www.nseindia.com/api/equity-stockIndices?index={index_query_param}"
+    try:
+        resp = session.get(url, timeout=15)
+        resp.encoding = "utf-8"
+        if resp.status_code == 200 and len(resp.content) > 200:
+            data = resp.json()
+            stocks = data.get("data", [])
+            # First entry is the index itself — filter it out
+            return [s for s in stocks if s.get("symbol") and s.get("series") in ("EQ", "BE", "SM", None)]
+        else:
+            return []
+    except Exception as e:
+        print(f"  [NSE] API call failed for {index_query_param}: {e}")
+        return []
+
+
+def fetch_groww_ltp(nse_symbol):
+    """
+    Fetches real-time LTP from Groww's free public API.
+    No auth required. Returns dict with ltp, open, high, low, close, dayChangePerc.
+    Returns {} on failure.
     """
     try:
-        # Using NSE India public JSON endpoint
-        index_mapping = {
-            "NIFTY_50": "https://archives.nseindia.com/content/historical/EQUITIES/",
-            "NIFTY_MIDCAP_50": "https://www.nseindia.com/api/equity-stockIndices",
-            "NIFTY_SMALLCAP_50": "https://www.nseindia.com/api/equity-stockIndices",
-            "NIFTY_IT": "https://www.nseindia.com/api/equity-stockIndices",
-        }
-
-        # Method 1: Try NSE India API (more reliable)
+        url = (
+            f"https://groww.in/v1/api/stocks_data/v1/accord_points/"
+            f"exchange/NSE/segment/CASH/latest_prices_ohlc/{nse_symbol}"
+        )
         headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://www.nseindia.com"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
         }
-        
-        symbols = []
-        
-        # For NIFTY 50, fetch from a reliable free API
-        if index_name == "NIFTY_50":
-            url = "https://www.nseindia.com/api/equity-indices"
-            try:
-                resp = requests.get(url, headers=headers, timeout=10)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # Extract from index data if available
-                    for item in data.get("data", []):
-                        if item.get("index") == "Nifty 50":
-                            stocks = item.get("constituents", [])
-                            symbols = [f"{s.upper()}.NS" for s in stocks[:50]]
-                            break
-            except:
-                pass
-
-        # Method 2: Fallback - use Yahoo Finance to get NIFTY 50 data
-        if not symbols:
-            try:
-                nifty_data = yf.download("^NSEI", period="1d", progress=False)
-                # Since we can't directly get constituents, use hardcoded for initial load
-                symbols = [
-                    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
-                    "HINDUNILVR.NS", "SBIN.NS", "BAJFINANCE.NS", "BHARTIARTL.NS", "ITC.NS",
-                    "KOTAKBANK.NS", "LT.NS", "HCLTECH.NS", "ASIANPAINT.NS", "AXISBANK.NS",
-                    "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "ULTRACEMCO.NS", "WIPRO.NS",
-                ]
-            except:
-                pass
-        
-        # For midcap and smallcap, use reasonable defaults
-        if index_name == "NIFTY_MIDCAP_50":
-            symbols = [
-                "PERSISTENT.NS", "COFORGE.NS", "MPHASIS.NS", "LTIM.NS", "LTTS.NS",
-                "TORNTPHARM.NS", "AUROPHARMA.NS", "BIOCON.NS", "PIIND.NS", "ALKEM.NS",
-                "FEDERALBNK.NS", "BANDHANBNK.NS", "CUB.NS", "IDFCFIRSTB.NS", "RBLBANK.NS",
-            ]
-        
-        if index_name == "NIFTY_SMALLCAP_50":
-            symbols = [
-                "KPRMILL.NS", "HAPPSTMNDS.NS", "RAILTEL.NS", "CDSL.NS", "BSE.NS",
-                "ROUTE.NS", "MSTCLTD.NS", "ELGIEQUIP.NS", "CRAFTSMAN.NS", "LATENTVIEW.NS",
-            ]
-        
-        if index_name == "NIFTY_IT":
-            symbols = [
-                "INFY.NS", "TCS.NS", "WIPRO.NS", "HCLTECH.NS", "TECHM.NS", 
-                "PERSISTENT.NS", "COFORGE.NS", "MPHASIS.NS"
-            ]
-
-        return symbols
-
-    except Exception as e:
-        print(f"[Index Fetch] Error fetching {index_name}: {e}")
-        return []
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return {}
 
 
 def build_dynamic_watchlist():
     """
-    Builds watchlist dynamically from NSE indices.
-    Combines large cap, mid cap, small cap, and IT sector stocks.
+    Builds watchlist DYNAMICALLY from live NSE India APIs.
+
+    1. Creates an NSE session (cookie warm-up)
+    2. Fetches real-time quotes for NIFTY 50, MIDCAP 50, SMLCAP 50, IT, BANK, PHARMA
+    3. Stores real-time LTP/OHLC in _REALTIME_QUOTES for use during analysis
+    4. Returns deduplicated list of "SYMBOL.NS" strings
+
+    Falls back to hardcoded list only if ALL APIs fail.
     """
-    global WATCHLIST_CACHE, LAST_CACHE_TIME
-    
+    global _WATCHLIST_CACHE, _REALTIME_QUOTES, _LAST_CACHE_TIME
+
     current_time = time.time()
-    
-    # Use cache if valid
-    if WATCHLIST_CACHE and (current_time - LAST_CACHE_TIME) < CACHE_EXPIRY:
-        return WATCHLIST_CACHE
-    
-    print("[Watchlist] Building dynamic watchlist from NSE indices...")
-    
+
+    # Use cache if still valid
+    if _WATCHLIST_CACHE and (current_time - _LAST_CACHE_TIME) < _CACHE_EXPIRY:
+        return _WATCHLIST_CACHE
+
+    print("[Watchlist] Fetching LIVE constituents from NSE India APIs...")
+
+    session, session_ok = _create_nse_session()
+
     all_symbols = set()
-    
-    # Fetch from each index
-    for index_key, index_info in NSE_INDICES.items():
-        print(f"  → Fetching {index_info['name']}...", end=" ")
-        stocks = fetch_index_constituents(index_key)
-        if stocks:
-            all_symbols.update(stocks)
-            print(f"✓ ({len(stocks)} stocks)")
-        else:
-            print("✗ (using fallback)")
-    
+    realtime = {}
+
+    if session_ok or True:    # try anyway — NSE sometimes gives 403 on homepage but API still works
+        for index_name, index_param in NSE_INDEX_MAP.items():
+            print(f"  > {index_name}...", end=" ")
+            time.sleep(0.8)   # rate-limit: NSE throttles fast bursts
+            stocks = fetch_nse_index_quotes(session, index_param)
+            if stocks:
+                print(f"OK {len(stocks)} stocks (LIVE)")
+                for s in stocks:
+                    sym = s.get("symbol", "")
+                    if not sym or sym == index_name:
+                        continue
+                    yf_sym = f"{sym}.NS"
+                    all_symbols.add(yf_sym)
+                    # Store real-time quote for use during analysis
+                    realtime[sym] = {
+                        "lastPrice":     s.get("lastPrice"),
+                        "open":          s.get("open"),
+                        "dayHigh":       s.get("dayHigh"),
+                        "dayLow":        s.get("dayLow"),
+                        "previousClose": s.get("previousClose"),
+                        "change":        s.get("change"),
+                        "pChange":       s.get("pChange"),
+                        "volume":        s.get("totalTradedVolume"),
+                        "yearHigh":      s.get("yearHigh"),
+                        "yearLow":       s.get("yearLow"),
+                        "nearWKH":       s.get("nearWKH"),
+                        "nearWKL":       s.get("nearWKL"),
+                        "perChange30d":  s.get("perChange30d"),
+                        "perChange365d": s.get("perChange365d"),
+                        "companyName":   (s.get("meta") or {}).get("companyName", sym),
+                        "industry":      (s.get("meta") or {}).get("industry", ""),
+                        "isin":          (s.get("meta") or {}).get("isin", ""),
+                    }
+            else:
+                print("X (no data)")
+
     # Fallback if nothing was fetched
     if not all_symbols:
-        print("[Watchlist] All APIs failed. Using fallback watchlist.")
-        all_symbols = set(FALLBACK_WATCHLIST)
-    
+        print("[Watchlist] All live APIs failed — using fallback list.")
+        all_symbols = set(_FALLBACK_SYMBOLS)
+
     watchlist = list(all_symbols)
-    
-    # Cache for later
-    WATCHLIST_CACHE = watchlist
-    LAST_CACHE_TIME = current_time
-    
-    print(f"[Watchlist] Total stocks: {len(watchlist)}")
+
+    # Update caches
+    _WATCHLIST_CACHE = watchlist
+    _REALTIME_QUOTES = realtime
+    _LAST_CACHE_TIME = current_time
+
+    print(f"[Watchlist] Total unique stocks: {len(watchlist)} ({len(realtime)} with real-time quotes)")
     return watchlist
+
+
+def get_realtime_quote(nse_code):
+    """
+    Returns the cached real-time quote for a stock (from NSE API).
+    Falls back to Groww API if not in cache.
+    Returns dict or {} if unavailable.
+    """
+    quote = _REALTIME_QUOTES.get(nse_code, {})
+    if not quote:
+        # Try Groww as fallback
+        quote = fetch_groww_ltp(nse_code)
+        if quote:
+            _REALTIME_QUOTES[nse_code] = quote
+    return quote
 
 
 # ─────────────────────────────────────────────
@@ -1154,6 +1210,37 @@ def analyse_stock(symbol, promoter_signals, market_conditions):
             "eps_growth":       funds.get("eps_growth"),
             "analyst_rating":   funds.get("analyst_rating"),
         }
+
+        # ── Overlay LIVE prices from NSE/Groww real-time APIs ─────────────
+        # These are truly real-time (fetched at the start of the run)
+        # and override the yfinance daily close which may be stale.
+        rt = get_realtime_quote(nse_code)
+        if rt:
+            ltp = rt.get("lastPrice") or rt.get("ltp")
+            if ltp is not None:
+                result["price"] = round(float(ltp), 2)
+            pchg = rt.get("pChange") or rt.get("dayChangePerc")
+            if pchg is not None:
+                result["intraday_change"] = round(float(pchg), 2)
+            if rt.get("yearHigh") is not None:
+                result["high_52w"] = round(float(rt["yearHigh"]), 2)
+            if rt.get("yearLow") is not None:
+                result["low_52w"] = round(float(rt["yearLow"]), 2)
+            if rt.get("companyName"):
+                result["company_name"] = rt["companyName"]
+            if rt.get("industry"):
+                result["industry"] = rt["industry"]
+            if rt.get("volume") is not None:
+                result["live_volume"] = int(rt["volume"])
+            # Recalculate 52-week position from live data
+            if rt.get("yearHigh") and result["price"] > 0:
+                result["pct_from_52w_high"] = round(
+                    ((float(rt["yearHigh"]) - result["price"]) / float(rt["yearHigh"])) * 100, 2
+                )
+            if rt.get("yearLow") and result["price"] > 0:
+                result["pct_from_52w_low"] = round(
+                    ((result["price"] - float(rt["yearLow"])) / float(rt["yearLow"])) * 100, 2
+                )
 
         return result
 
