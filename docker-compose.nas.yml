@@ -1,0 +1,65 @@
+# ── StockRadar IN — NAS Docker Compose ────────────────────────────────────────
+# PURPOSE : Full self-hosted deployment on a NAS server (Synology / QNAP / etc.)
+# USAGE   : docker compose -f docker-compose.nas.yml up -d
+# NOTE    : This is SEPARATE from the Vercel frontend — do not mix them.
+#           The Vercel frontend continues to run independently.
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Backend: FastAPI + APScheduler ──────────────────────────────────────────
+  stockradar-backend:
+    build:
+      context: .                        # project root (needs Analyzer.py + core/)
+      dockerfile: Dockerfile.backend
+    container_name: stockradar-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"                     # Expose backend on NAS port 8000
+    volumes:
+      # Persist SQLite + DuckDB databases to NAS storage
+      # Change left side to your NAS shared folder path
+      - ./nas-data/backend:/app/backend/data
+    environment:
+      # ── Email alerts ──────────────────────────────────────────────────────
+      - GMAIL_SENDER=${GMAIL_SENDER}
+      - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}
+      - RECIPIENT_EMAIL=${RECIPIENT_EMAIL}
+      # ── Optional integrations ──────────────────────────────────────────────
+      - NEWSAPI_KEY=${NEWSAPI_KEY:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      # ── Python settings ───────────────────────────────────────────────────
+      - PYTHONUTF8=1
+      - TZ=Asia/Kolkata
+    networks:
+      - stockradar-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── Frontend: React (Vite build) served by Nginx ────────────────────────────
+  stockradar-frontend:
+    build:
+      context: ./frontend               # build context is frontend/
+      dockerfile: Dockerfile.frontend
+      args:
+        # Nginx proxies /api/* to backend container internally
+        # So the frontend just calls /api/ (same origin — no CORS)
+        VITE_API_URL: /api
+    container_name: stockradar-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"                       # Access dashboard at http://NAS-IP:3000
+    depends_on:
+      stockradar-backend:
+        condition: service_healthy
+    networks:
+      - stockradar-net
+
+networks:
+  stockradar-net:
+    driver: bridge
