@@ -7,12 +7,13 @@ StockRadar IN — FastAPI Backend
 • REST API consumed by the React dashboard
 """
 
-import sys, os, json, sqlite3, logging
+import sys, os, json, sqlite3, logging, math
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
+from fastapi.responses import JSONResponse
 
 # ── allow importing parent Analyzer.py ────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -68,7 +69,25 @@ def init_db():
     log.info("DB initialised at %s", DB_PATH)
 
 
+def sanitize_floats(obj):
+    """
+    Recursively walk obj (dict/list/scalar) and replace any float NaN or Inf
+    with None so the result is always valid JSON.
+    This prevents 'ValueError: Out of range float values are not JSON compliant'.
+    """
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: sanitize_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_floats(i) for i in obj]
+    return obj
+
+
 def save_run(market: dict, results: list, email_sent: bool):
+    # Sanitize before storing so DB never contains NaN/Inf strings
+    clean_market  = sanitize_floats(market)
+    clean_results = sanitize_floats(results)
     with get_db() as conn:
         conn.execute(
             """INSERT INTO runs
@@ -76,11 +95,11 @@ def save_run(market: dict, results: list, email_sent: bool):
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
                 datetime.now().isoformat(),
-                market.get("market_trend"),
-                market.get("vix_value"),
-                market.get("nifty_50_change"),
-                json.dumps(market.get("sector_changes", {})),
-                json.dumps(results, default=str),
+                clean_market.get("market_trend"),
+                clean_market.get("vix_value"),
+                clean_market.get("nifty_50_change"),
+                json.dumps(clean_market.get("sector_changes", {})),
+                json.dumps(clean_results),
                 int(email_sent),
             ),
         )
@@ -192,11 +211,12 @@ def latest():
             "SELECT * FROM runs ORDER BY id DESC LIMIT 1"
         ).fetchone()
     if not row:
-        return {"run": None, "results": []}
+        return JSONResponse({"run": None, "results": []})
     d = dict(row)
     d["results_json"]   = json.loads(d["results_json"] or "[]")
     d["sector_changes"] = json.loads(d["sector_changes"] or "{}")
-    return {"run": d, "results": d["results_json"]}
+    payload = sanitize_floats({"run": d, "results": d["results_json"]})
+    return JSONResponse(payload)
 
 
 @app.get("/api/history")
@@ -209,7 +229,7 @@ def history(limit: int = 20):
                FROM runs ORDER BY id DESC LIMIT ?""",
             (limit,),
         ).fetchall()
-    return [dict(r) for r in rows]
+    return JSONResponse(sanitize_floats([dict(r) for r in rows]))
 
 
 @app.get("/api/runs/{run_id}")
@@ -222,7 +242,7 @@ def get_run(run_id: int):
     d = dict(row)
     d["results_json"]   = json.loads(d["results_json"] or "[]")
     d["sector_changes"] = json.loads(d["sector_changes"] or "{}")
-    return d
+    return JSONResponse(sanitize_floats(d))
 
 
 @app.post("/api/trigger")

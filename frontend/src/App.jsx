@@ -10,7 +10,7 @@ import {
   CheckCircle, AlertTriangle, MinusCircle
 } from 'lucide-react'
 
-const API = 'http://localhost:8000/api'
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 const fmt = (n, d=2) => n != null ? Number(n).toFixed(d) : '—'
@@ -169,8 +169,8 @@ function StocksTable({ stocks, filter, title, colorClass }) {
     return typeof av === 'string' ? av.localeCompare(bv)*sortDir : (bv-av)*-sortDir
   })
 
-  const col = (key, label) => (
-    <th onClick={() => { setSortDir(sortKey===key ? -sortDir : -1); setSortKey(key) }}>
+  const col = (key, label, desc) => (
+    <th title={desc} onClick={() => { setSortDir(sortKey===key ? -sortDir : -1); setSortKey(key) }}>
       {label}
       {sortKey===key && (sortDir===-1 ? <ChevronDown size={11} style={{marginLeft:4}}/> : <ChevronUp size={11} style={{marginLeft:4}}/>)}
     </th>
@@ -192,17 +192,17 @@ function StocksTable({ stocks, filter, title, colorClass }) {
           <table>
             <thead>
               <tr>
-                {col('symbol','Symbol')}
-                {col('price','Price')}
-                {col('score','Score')}
-                {col('rsi','RSI')}
-                {col('adx','ADX')}
-                {col('atr_pct','ATR')}
-                {col('intraday_change','Today')}
-                {col('news_score','News')}
-                {col('revenue_growth','Rev Gr.')}
-                {col('volume_ratio','Vol')}
-                <th>Signal</th>
+                {col('symbol','Symbol', 'Stock ticker symbol on NSE')}
+                {col('price','Price', 'Latest traded price in INR')}
+                {col('score','Score', 'AI Multi-Factor Score (0-100)')}
+                {col('rsi','RSI', 'Relative Strength Index (Momentum indicator)')}
+                {col('adx','ADX', 'Average Directional Index (Trend strength > 25 is strong)')}
+                {col('atr_pct','ATR', 'Average True Range % (Daily volatility measure)')}
+                {col('intraday_change','Today', 'Intraday price change %')}
+                {col('news_score','News', 'FinBERT sentiment score for recent news')}
+                {col('revenue_growth','Rev Gr.', '1-Year Revenue Growth % (Fundamental metric)')}
+                {col('volume_ratio','Vol', 'Volume relative to 20-day average (e.g., 2.0x)')}
+                <th title="Final AI generated recommendation signal">Signal</th>
               </tr>
             </thead>
             <tbody>

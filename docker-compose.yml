@@ -1,0 +1,69 @@
+version: "3.9"
+
+services:
+  # ── Zookeeper (Kafka coordination) ─────────────────────────────────────────
+  zookeeper:
+    image: bitnami/zookeeper:3.9
+    container_name: stockradar_zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ALLOW_ANONYMOUS_LOGIN: "yes"
+    volumes:
+      - zookeeper_data:/bitnami/zookeeper
+    restart: unless-stopped
+
+  # ── Kafka Broker ───────────────────────────────────────────────────────────
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: stockradar_kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_CFG_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_CFG_NUM_PARTITIONS: 3
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_CFG_LOG_RETENTION_HOURS: 168   # 7 days replay window
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    volumes:
+      - kafka_data:/bitnami/kafka
+    depends_on:
+      - zookeeper
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── Redis (Feature cache + alert pub/sub) ──────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: stockradar_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+
+  # ── Kafka UI (optional — browse topics visually) ───────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: stockradar_kafka_ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: stockradar
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      - kafka
+    restart: unless-stopped
+
+volumes:
+  zookeeper_data:
+  kafka_data:
+  redis_data:

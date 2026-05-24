@@ -1,12 +1,46 @@
-# Core analysis
+# ── Core analysis (existing) ───────────────────────────────────────────────────
 yfinance>=0.2.40
 pandas>=2.0.0
 ta>=0.11.0
 requests>=2.31.0
 schedule>=1.2.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
 
-# Backend API
+# ── Backend API ────────────────────────────────────────────────────────────────
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
 apscheduler>=3.10.0
 pytz>=2024.1
+
+# ── Data Lake ─────────────────────────────────────────────────────────────────
+duckdb>=0.10.0
+
+# ── Event Bus (Kafka) ─────────────────────────────────────────────────────────
+kafka-python>=2.0.2
+
+# ── Feature cache ─────────────────────────────────────────────────────────────
+redis>=5.0.0
+
+# ── ML Engine ─────────────────────────────────────────────────────────────────
+scikit-learn>=1.4.0
+xgboost>=2.0.0
+lightgbm>=4.3.0
+shap>=0.45.0
+hmmlearn>=0.3.0      # Hidden Markov Model for regime detection
+numpy>=1.26.0
+
+# ── NLP Sentiment ─────────────────────────────────────────────────────────────
+vaderSentiment>=3.3.2
+# transformers>=4.40.0   # Uncomment to enable FinBERT (requires torch, ~500MB download)
+# torch>=2.2.0           # Uncomment for FinBERT
+
+# ── Backtesting ───────────────────────────────────────────────────────────────
+# vectorbt>=0.26.0     # Uncomment to enable VectorBT (large install)
+
+# ── Alerts ────────────────────────────────────────────────────────────────────
+python-telegram-bot>=21.0.0   # Telegram push alerts
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0          # .env config
+concurrent-log-handler>=0.9.25

@@ -1268,11 +1268,25 @@ def run_analysis():
     print(f"({len(promoter_signals)} found)")
 
     results = []
-    for i, sym in enumerate(watchlist):
-        print(f"  [{i+1}/{len(watchlist)}] {sym}", end="\r")
-        result = analyse_stock(sym, promoter_signals, market_conditions)
-        if result:
-            results.append(result)
+    
+    print(f"  Starting parallel analysis with max_workers=8...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_sym = {
+            executor.submit(analyse_stock, sym, promoter_signals, market_conditions): sym
+            for sym in watchlist
+        }
+        
+        completed = 0
+        for future in concurrent.futures.as_completed(future_to_sym):
+            completed += 1
+            sym = future_to_sym[future]
+            print(f"  [{completed}/{len(watchlist)}] Processed {sym}        ", end="\r")
+            try:
+                result = future.result()
+                if result:
+                    results.append(result)
+            except Exception as e:
+                print(f"\n  [Error] {sym}: {e}")
 
     results.sort(key=lambda x: x["score"], reverse=True)
     print(f"\nAnalysis complete. {len(results)} stocks processed.")
