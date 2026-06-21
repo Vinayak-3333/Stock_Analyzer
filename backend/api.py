@@ -1,8 +1,8 @@
 """
 StockRadar IN — FastAPI Backend
 ================================
-• Imports analysis engine from parent Analyzer.py
-• APScheduler: fires run_analysis() at 09:15 & 15:30 IST on weekdays
+• Imports the modular pipeline from core/pipeline.py
+• APScheduler: fires modular analysis at 09:15 & 15:30 IST on weekdays
 • SQLite: persists every run (market conditions + all stock results as JSON)
 • REST API consumed by the React dashboard
 """
@@ -27,13 +27,11 @@ import pytz
 
 # Import analysis functions (scheduler guard in Analyzer.py ensures no auto-run)
 from Analyzer import (
-    run_analysis,
-    get_market_conditions,
-    fetch_promoter_signals,
     build_email_body,
     build_subject,
     send_gmail,
 )
+from core.pipeline import get_modular_market_conditions, run_modular_analysis
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -118,8 +116,8 @@ def analysis_job(send_email: bool = True):
     _running = True
     log.info("=== Analysis job started ===")
     try:
-        results = run_analysis()
-        market  = get_market_conditions()
+        results = run_modular_analysis()
+        market  = get_modular_market_conditions()
         emailed = False
 
         if send_email and results:
@@ -258,7 +256,7 @@ def trigger(background_tasks: BackgroundTasks, email: bool = True):
 def market():
     """Live market conditions (fetched fresh on demand)."""
     try:
-        cond = get_market_conditions()
+        cond = get_modular_market_conditions()
         return cond
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
