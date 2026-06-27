@@ -106,8 +106,14 @@ def compute_all_features(
     # Sector score derived from regime sector data
     sector_score = 50.0
     if regime and regime.get("sector_breadth"):
-        avg_sector = sum(regime["sector_breadth"].values()) / max(len(regime["sector_breadth"]), 1)
-        sector_score = max(0, min(100, 50 + avg_sector * 5))
+        sector_values = [
+            float(v)
+            for v in regime["sector_breadth"].values()
+            if v is not None and pd.notna(v)
+        ]
+        if sector_values:
+            avg_sector = sum(sector_values) / len(sector_values)
+            sector_score = max(0, min(100, 50 + avg_sector * 5))
 
     # Risk score derived from fundamental filters
     risk_score = 50.0

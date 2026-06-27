@@ -22,7 +22,7 @@ import yfinance as yf
 from core.collectors.nse import _make_session, collect_all_quotes
 from core.features.regime import compute_regime_features
 from core.features.store import compute_all_features
-from core.lake.manager import get_lake
+from core.lake.manager import close_lake, get_lake
 from core.lake.schema import init_schema
 from core.risk.engine import apply_risk_to_results
 from core.scoring.hybrid import calculate_final_score
@@ -141,18 +141,20 @@ def _score_inputs(features: dict, quote: dict, market: dict) -> tuple[dict, dict
         "pe_ratio": features.get("f_pe_ratio"),
         "promoter_holding": features.get("f_promoter_holding"),
         "pledged_pct": features.get("f_pledged_pct"),
+        "market_cap_cr": features.get("f_market_cap_cr"),
     }
     institutional = {
-        "fii_net_3d": features.get("i_fii_net_3d"),
-        "dii_net_3d": features.get("i_dii_net_3d"),
-        "delivery_pct": features.get("i_delivery_pct"),
+        "fii_3d_net": features.get("i_fii_net_3d"),
+        "dii_3d_net": features.get("i_dii_net_3d"),
+        "delivery_pct_5d": features.get("i_delivery_5d_avg") or features.get("i_delivery_pct"),
         "delivery_spike": features.get("i_delivery_spike"),
         "pcr": features.get("i_pcr"),
-        "oi_buildup_bullish": features.get("i_oi_buildup_bullish"),
-        "max_pain_distance_pct": features.get("i_max_pain_distance_pct"),
+        "oi_buildup": features.get("i_oi_buildup_bullish"),
+        "max_pain_dist": features.get("i_max_pain_distance_pct"),
     }
     sentiment = {
-        "news_score": features.get("s_sentiment_score"),
+        "avg_score": features.get("s_vader_score") or features.get("s_sentiment_score"),
+        "article_count": features.get("s_headline_count"),
         "event_type": features.get("s_event_type"),
         "gdelt_tone": features.get("s_gdelt_tone"),
     }
@@ -162,10 +164,16 @@ def _score_inputs(features: dict, quote: dict, market: dict) -> tuple[dict, dict
         "market_cap_cr": features.get("f_market_cap_cr"),
         "avg_volume": quote.get("totalTradedVolume"),
         "pledged_pct": features.get("f_pledged_pct"),
+        "atr_pct": features.get("t_atr_pct"),
+        "event_type": features.get("s_event_type"),
     }
     market_for_score = {
         **market,
         "sector_changes": market.get("sector_changes") or {},
+        "sector_momentum": features.get("sector_score"),
+        "breadth_pct": features.get("r_breadth_pct"),
+        "crude_regime": features.get("r_crude_regime"),
+        "usdinr_regime": features.get("r_usdinr_regime"),
     }
     return fundamental, technical, institutional, sentiment, market_for_score, stock_meta
 
@@ -243,78 +251,87 @@ def _result_from_features(symbol: str, features: dict, quote: dict, score_result
 
 
 def analyse_symbol(symbol: str, quote: dict, nifty_df: pd.DataFrame | None, regime: dict | None, market: dict, session: object) -> dict | None:
-    yf_symbol = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
-    df = _download_history(yf_symbol)
-    if df is None:
-        return None
+    try:
+        yf_symbol = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
+        df = _download_history(yf_symbol)
+        if df is None:
+            return None
 
-    _store_ohlcv(symbol, df)
-    ticker = yf.Ticker(yf_symbol)
-    features = compute_all_features(
-        yf_symbol,
-        df,
-        nifty_df=nifty_df,
-        regime=regime,
-        ticker=ticker,
-        nse_session=session,
-        company_name=quote.get("companyName") or symbol,
-    )
-    fundamental, technical, institutional, sentiment, score_market, stock_meta = _score_inputs(features, quote, market)
-    score_result = calculate_final_score(
-        fundamental=fundamental,
-        technical=technical,
-        institutional=institutional,
-        sentiment=sentiment,
-        market=score_market,
-        stock_meta=stock_meta,
-        regime=_regime_code(regime),
-    )
-    return _result_from_features(yf_symbol, features, quote, score_result)
+        _store_ohlcv(symbol, df)
+        ticker = yf.Ticker(yf_symbol)
+        features = compute_all_features(
+            yf_symbol,
+            df,
+            nifty_df=nifty_df,
+            regime=regime,
+            ticker=ticker,
+            nse_session=session,
+            company_name=quote.get("companyName") or symbol,
+        )
+        fundamental, technical, institutional, sentiment, score_market, stock_meta = _score_inputs(features, quote, market)
+        score_result = calculate_final_score(
+            fundamental=fundamental,
+            technical=technical,
+            institutional=institutional,
+            sentiment=sentiment,
+            market=score_market,
+            stock_meta=stock_meta,
+            regime=_regime_code(regime),
+        )
+        return _result_from_features(yf_symbol, features, quote, score_result)
+    finally:
+        close_lake()
 
 
 def run_modular_analysis(limit: int | None = None) -> list[dict]:
     """
     Run the full modular analysis pipeline and return API-ready stock results.
     """
-    log.info("Modular analysis started at %s", datetime.now().isoformat())
-    init_schema()
+    try:
+        log.info("Modular analysis started at %s", datetime.now().isoformat())
+        init_schema()
 
-    session = _make_session()
-    quotes = collect_all_quotes(session)
-    if not quotes:
-        log.warning("No NSE quotes collected; falling back to default modular watchlist")
-        quotes = {sym: {"symbol": sym, "companyName": sym, "industry": ""} for sym in FALLBACK_SYMBOLS}
+        session = _make_session()
+        quotes = collect_all_quotes(session)
+        if not quotes:
+            log.warning("No NSE quotes collected; falling back to default modular watchlist")
+            quotes = {sym: {"symbol": sym, "companyName": sym, "industry": ""} for sym in FALLBACK_SYMBOLS}
 
-    symbols = sorted(quotes.keys())
-    if limit:
-        symbols = symbols[:limit]
+        symbols = sorted(quotes.keys())
+        if limit:
+            symbols = symbols[:limit]
 
-    regime = compute_regime_features()
-    market = _market_payload(regime)
-    nifty_df = _download_history("^NSEI")
+        regime = compute_regime_features()
+        market = _market_payload(regime)
+        nifty_df = _download_history("^NSEI")
 
-    results: list[dict] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {
-            executor.submit(analyse_symbol, sym, quotes.get(sym, {}), nifty_df, regime, market, session): sym
-            for sym in symbols
-        }
-        for future in concurrent.futures.as_completed(futures):
-            sym = futures[future]
-            try:
-                result = future.result()
-                if result:
-                    results.append(result)
-            except Exception as exc:
-                log.warning("Modular analysis failed for %s: %s", sym, exc)
+        results: list[dict] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {
+                executor.submit(analyse_symbol, sym, quotes.get(sym, {}), nifty_df, regime, market, session): sym
+                for sym in symbols
+            }
+            for future in concurrent.futures.as_completed(futures):
+                sym = futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        results.append(result)
+                except Exception as exc:
+                    log.exception("Modular analysis failed for %s: %s", sym, exc)
 
-    results = apply_risk_to_results(results)
-    results.sort(key=lambda item: item.get("score", 0), reverse=True)
-    log.info("Modular analysis complete: %d/%d stocks processed", len(results), len(symbols))
-    return results
+        results = apply_risk_to_results(results)
+        results.sort(key=lambda item: item.get("score", 0), reverse=True)
+        log.info("Modular analysis complete: %d/%d stocks processed", len(results), len(symbols))
+        return results
+    finally:
+        close_lake()
 
 
 def get_modular_market_conditions() -> dict:
     """Return market conditions using the modular regime feature layer."""
-    init_schema()
-    return _market_payload(compute_regime_features())
+    try:
+        init_schema()
+        return _market_payload(compute_regime_features())
+    finally:
+        close_lake()

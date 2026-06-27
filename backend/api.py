@@ -32,6 +32,7 @@ from Analyzer import (
     send_gmail,
 )
 from core.pipeline import get_modular_market_conditions, run_modular_analysis
+from core.lake.manager import close_lake
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -176,6 +177,7 @@ def on_startup():
 @app.on_event("shutdown")
 def on_shutdown():
     scheduler.shutdown(wait=False)
+    close_lake()
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
