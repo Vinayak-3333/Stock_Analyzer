@@ -17,6 +17,13 @@ const fmt = (n, d=2) => n != null ? Number(n).toFixed(d) : '—'
 const fmtPct = n => n != null ? `${n > 0 ? '+' : ''}${fmt(n)}%` : '—'
 const fmtPrice = n => n != null ? `₹${Number(n).toLocaleString('en-IN', {minimumFractionDigits:2,maximumFractionDigits:2})}` : '—'
 const scoreColor = s => s >= 75 ? 'var(--green)' : s >= 55 ? 'var(--blue)' : s <= 25 ? 'var(--red)' : 'var(--text-2)'
+const newsScoreColor = s => s >= 60 ? 'var(--green)' : s <= 40 ? 'var(--red)' : 'var(--text-3)'
+const getNewsScore = s => {
+  const raw = s?.news_score
+  const fallback = s?.factor_scores?.sentiment
+  if ((raw == null || Number(raw) === 0) && fallback != null) return Number(fallback)
+  return raw != null ? Number(raw) : null
+}
 const trendColor = v => v > 0 ? 'pos' : v < 0 ? 'neg' : 'neu'
 
 // ── ScoreBar ──────────────────────────────────────────────────────────────────
@@ -44,6 +51,7 @@ function NewsIcon({ sentiment }) {
 // ── StockModal ────────────────────────────────────────────────────────────────
 function StockModal({ stock, onClose }) {
   if (!stock) return null
+  const newsScore = getNewsScore(stock)
   const technicals = [
     { k:'RSI (14)',      v: fmt(stock.rsi,1),    cls: stock.rsi < 30 ? 'pos' : stock.rsi > 70 ? 'neg' : '' },
     { k:'ADX',          v: fmt(stock.adx,0) },
@@ -94,7 +102,7 @@ function StockModal({ stock, onClose }) {
                 <span style={{fontSize:12, color:'var(--text-2)'}}>Gap: {fmtPct(stock.open_gap)}</span>
               )}
               <NewsIcon sentiment={stock.news_sentiment} />
-              <span style={{fontSize:12, color:'var(--text-3)'}}>News score: {stock.news_score > 0 ? '+' : ''}{fmt(stock.news_score,0)}</span>
+              <span style={{fontSize:12, color:'var(--text-3)'}}>News score: {fmt(newsScore,0)}/100</span>
             </div>
           </div>
 
@@ -163,7 +171,8 @@ function StocksTable({ stocks, filter, title, colorClass }) {
   const [sortDir, setSortDir] = useState(-1)
   const [selected, setSelected] = useState(null)
 
-  const filtered = stocks.filter(s => !filter || s.signal === filter)
+  const enriched = stocks.map(s => ({ ...s, news_score: getNewsScore(s) }))
+  const filtered = enriched.filter(s => !filter || s.signal === filter)
   const sorted = [...filtered].sort((a,b) => {
     const av = a[sortKey] ?? -999, bv = b[sortKey] ?? -999
     return typeof av === 'string' ? av.localeCompare(bv)*sortDir : (bv-av)*-sortDir
@@ -194,15 +203,15 @@ function StocksTable({ stocks, filter, title, colorClass }) {
               <tr>
                 {col('symbol','Symbol', 'Stock ticker symbol on NSE')}
                 {col('price','Price', 'Latest traded price in INR')}
-                {col('score','Score', 'AI Multi-Factor Score (0-100)')}
+                {col('score','Score', 'Multi-Factor Score (0-100)')}
                 {col('rsi','RSI', 'Relative Strength Index (Momentum indicator)')}
                 {col('adx','ADX', 'Average Directional Index (Trend strength > 25 is strong)')}
                 {col('atr_pct','ATR', 'Average True Range % (Daily volatility measure)')}
                 {col('intraday_change','Today', 'Intraday price change %')}
-                {col('news_score','News', 'FinBERT sentiment score for recent news')}
+                {col('news_score','News', 'Sentiment sub-score from recent news (0-100)')}
                 {col('revenue_growth','Rev Gr.', '1-Year Revenue Growth % (Fundamental metric)')}
                 {col('volume_ratio','Vol', 'Volume relative to 20-day average (e.g., 2.0x)')}
-                <th title="Final AI generated recommendation signal">Signal</th>
+                <th title="Final recommendation signal">Signal</th>
               </tr>
             </thead>
             <tbody>
@@ -218,8 +227,8 @@ function StocksTable({ stocks, filter, title, colorClass }) {
                     {s.intraday_change ? fmtPct(s.intraday_change) : '—'}
                   </td>
                   <td>
-                    <span style={{fontFamily:'var(--mono)', fontSize:12, color: s.news_score > 0 ? 'var(--green)' : s.news_score < 0 ? 'var(--red)' : 'var(--text-3)'}}>
-                      {s.news_score != null ? (s.news_score > 0 ? '+' : '') + fmt(s.news_score,0) : '—'}
+                    <span style={{fontFamily:'var(--mono)', fontSize:12, color: s.news_score != null ? newsScoreColor(s.news_score) : 'var(--text-3)'}}>
+                      {s.news_score != null ? fmt(s.news_score,0) : '—'}
                     </span>
                     <NewsIcon sentiment={s.news_sentiment} />
                   </td>

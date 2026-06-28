@@ -19,6 +19,28 @@ from fastapi.responses import JSONResponse
 sys.path.insert(0, str(Path(__file__).parent.parent))
 os.environ.setdefault("PYTHONUTF8", "1")
 
+# ── Load .env from project root (backend is launched from backend/ subdir) ─────
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+try:
+    from dotenv import load_dotenv, dotenv_values
+    _env_file    = _PROJECT_ROOT / ".env"
+    _env_example = _PROJECT_ROOT / ".env.nas.example"
+    if _env_file.exists():
+        load_dotenv(dotenv_path=str(_env_file), override=False)
+    # Backfill any key that is still empty from .env.nas.example
+    if _env_example.exists():
+        for _k, _v in dotenv_values(str(_env_example)).items():
+            if _v and not os.environ.get(_k):
+                os.environ[_k] = _v
+    logging.getLogger("stockradar").info(
+        "Env loaded from %s (AV key present: %s, TD key present: %s)",
+        _env_file,
+        bool(os.environ.get("ALPHA_VANTAGE_API_KEY")),
+        bool(os.environ.get("TWELVE_DATA_API_KEY")),
+    )
+except Exception as _e:
+    pass
+
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -33,10 +55,22 @@ from Analyzer import (
 )
 from core.pipeline import get_modular_market_conditions, run_modular_analysis
 from core.lake.manager import close_lake
+from core.events.store import get_event_stats, get_recent_events
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("stockradar")
+
+# ── Suppress harmless Windows asyncio WinError 10054 noise ────────────────────
+# This fires when a browser tab refreshes/closes mid-response — not a real error.
+class _SuppressWinError10054(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+        msg = record.getMessage()
+        return "WinError 10054" not in msg and "connection_lost" not in msg.lower()
+
+for _noisy in ("asyncio", "uvicorn.error", "uvicorn.access"):
+    _logger = logging.getLogger(_noisy)
+    _logger.addFilter(_SuppressWinError10054())
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 DATA_DIR = Path(__file__).parent / "data"
@@ -83,10 +117,25 @@ def sanitize_floats(obj):
     return obj
 
 
+def normalize_result_scores(results: list) -> list:
+    """
+    Keep older saved runs compatible after score-field changes.
+    Earlier rows stored news_score as 0 even when factor_scores.sentiment existed.
+    """
+    for result in results or []:
+        if not isinstance(result, dict):
+            continue
+        news_score = result.get("news_score")
+        factor_sentiment = (result.get("factor_scores") or {}).get("sentiment")
+        if (news_score is None or news_score == 0) and factor_sentiment is not None:
+            result["news_score"] = factor_sentiment
+    return results
+
+
 def save_run(market: dict, results: list, email_sent: bool):
     # Sanitize before storing so DB never contains NaN/Inf strings
     clean_market  = sanitize_floats(market)
-    clean_results = sanitize_floats(results)
+    clean_results = sanitize_floats(normalize_result_scores(results))
     with get_db() as conn:
         conn.execute(
             """INSERT INTO runs
@@ -213,7 +262,7 @@ def latest():
     if not row:
         return JSONResponse({"run": None, "results": []})
     d = dict(row)
-    d["results_json"]   = json.loads(d["results_json"] or "[]")
+    d["results_json"]   = normalize_result_scores(json.loads(d["results_json"] or "[]"))
     d["sector_changes"] = json.loads(d["sector_changes"] or "{}")
     payload = sanitize_floats({"run": d, "results": d["results_json"]})
     return JSONResponse(payload)
@@ -240,7 +289,7 @@ def get_run(run_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Run not found")
     d = dict(row)
-    d["results_json"]   = json.loads(d["results_json"] or "[]")
+    d["results_json"]   = normalize_result_scores(json.loads(d["results_json"] or "[]"))
     d["sector_changes"] = json.loads(d["sector_changes"] or "{}")
     return JSONResponse(sanitize_floats(d))
 
@@ -262,6 +311,36 @@ def market():
         return cond
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/events")
+def events(limit: int = 100, stage: Optional[str] = None, symbol: Optional[str] = None):
+    """Recent event-driven pipeline events."""
+    return JSONResponse(sanitize_floats(get_recent_events(limit=limit, stage=stage, symbol=symbol)))
+
+
+@app.get("/api/events/status")
+def events_status():
+    """Event bus/lake health and per-stage counts."""
+    stats = get_event_stats()
+    return JSONResponse(
+        sanitize_floats(
+            {
+                "event_pipeline": "enabled",
+                "stages": [
+                    "stage_1_ingestion",
+                    "stage_2_feature_store",
+                    "stage_3_event_engine",
+                    "stage_4_scoring",
+                    "stage_5_backtest_log",
+                    "stage_6_ml_labeling",
+                    "stage_7_deployment",
+                    "stage_8_portfolio_risk",
+                ],
+                **stats,
+            }
+        )
+    )
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

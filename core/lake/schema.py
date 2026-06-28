@@ -256,12 +256,50 @@ DDL_STATEMENTS = [
     )
     """,
 
+    # Event-driven pipeline audit log.
+    """
+    CREATE TABLE IF NOT EXISTS event_log (
+        event_id        VARCHAR PRIMARY KEY,
+        topic           VARCHAR,
+        stage           VARCHAR,
+        event_type      VARCHAR,
+        symbol          VARCHAR,
+        severity        VARCHAR,
+        source          VARCHAR,
+        created_at      TIMESTAMP,
+        payload_json    VARCHAR
+    )
+    """,
+
+    # Score history for momentum, backtesting replay, and future ML labels.
+    """
+    CREATE TABLE IF NOT EXISTS score_history (
+        id                  UBIGINT DEFAULT hash(uuid()) PRIMARY KEY,
+        run_id              VARCHAR,
+        symbol              VARCHAR NOT NULL,
+        scored_at           TIMESTAMP DEFAULT current_timestamp,
+        score               DOUBLE,
+        signal              VARCHAR,
+        confidence          DOUBLE,
+        price               DOUBLE,
+        volume              BIGINT,
+        factor_scores_json  VARCHAR,
+        reasons_json        VARCHAR,
+        label_5d_return     DOUBLE,
+        label_10d_return    DOUBLE,
+        label_20d_return    DOUBLE
+    )
+    """,
+
     # ── Indexes for common query patterns ─────────────────────────────────────
     "CREATE INDEX IF NOT EXISTS idx_ohlcv_sym_date     ON raw_ohlcv(symbol, date)",
     "CREATE INDEX IF NOT EXISTS idx_delivery_sym_date  ON raw_delivery(symbol, date)",
     "CREATE INDEX IF NOT EXISTS idx_news_symbol        ON raw_news(symbol, published_at)",
     "CREATE INDEX IF NOT EXISTS idx_features_sym_date  ON feature_snapshots(symbol, snapshot_date)",
     "CREATE INDEX IF NOT EXISTS idx_alerts_sym         ON alert_history(symbol, triggered_at)",
+    "CREATE INDEX IF NOT EXISTS idx_events_stage_time  ON event_log(stage, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_events_symbol_time ON event_log(symbol, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_scores_sym_time    ON score_history(symbol, scored_at)",
 ]
 
 

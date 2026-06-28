@@ -27,6 +27,11 @@ services:
       - RECIPIENT_EMAIL=${RECIPIENT_EMAIL}
       # ── Optional integrations ──────────────────────────────────────────────
       - NEWSAPI_KEY=${NEWSAPI_KEY:-}
+      - ALPHA_VANTAGE_API_KEY=${ALPHA_VANTAGE_API_KEY:-}
+      - FINNHUB_API_KEY=${FINNHUB_API_KEY:-}
+      - TWELVE_DATA_API_KEY=${TWELVE_DATA_API_KEY:-}
+      - FMP_API_KEY=${FMP_API_KEY:-}
+      - MARKET_DATA_PROVIDER_ORDER=${MARKET_DATA_PROVIDER_ORDER:-finnhub,twelve_data,fmp,alpha_vantage}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       # ── Python settings ───────────────────────────────────────────────────

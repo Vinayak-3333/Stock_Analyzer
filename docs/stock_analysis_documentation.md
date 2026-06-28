@@ -629,3 +629,141 @@ To make the signal more reliable, validate it with:
 - Comparison against NIFTY benchmark returns.
 
 The scoring framework is a good starting point for screening, but its thresholds should be tuned using real historical outcomes.
+
+## 16. Real-Time Event-Driven Platform: Built To Stage 8
+
+The executive summary in `Executive Summary.pdf` has been converted into a working event-driven layer around the existing analyzer. The system now emits and persists stage events while the normal scheduled/manual analysis runs.
+
+### Stage 1: Data Ingestion
+
+Question considered: should the first event source be true tick streaming or the current NSE/Yahoo collectors?
+
+Current answer: use the existing NSE/Yahoo collectors as the first real-time source and emit `data.ingested` events. This keeps the platform working today while allowing Kafka/websocket/broker feeds to be added later.
+
+Implementation:
+
+- Contract: `stage_1_ingestion`
+- Topic: `stockradar.ingestion`
+- Event type: `data.ingested`
+- Payload includes price, volume, and source.
+
+### Stage 2: Feature Store
+
+Question considered: should the project switch immediately to TimescaleDB/Feast?
+
+Current answer: keep DuckDB as the offline feature/history store and use Redis/Kafka as optional online infrastructure. The code records feature-computation events and the schema now includes event and score history tables.
+
+Implementation:
+
+- Contract: `stage_2_feature_store`
+- Topic: `stockradar.features`
+- Event type: `features.computed`
+- Payload includes technical, fundamental, institutional, and sentiment sub-scores.
+
+### Stage 3: Event Engine
+
+Question considered: which triggers should be live first?
+
+Current answer: start with explainable rule triggers that already have source features: 52-week breakout, volume surge, news event, delivery spike, and FII flow.
+
+Implementation:
+
+- Contract: `stage_3_event_engine`
+- Topic: `stockradar.events`
+- Event types: `trigger.technical`, `trigger.volume`, `trigger.news`, `trigger.institutional`
+- Rules live in `core/events/engine.py`.
+
+### Stage 4: Dynamic Scoring
+
+Question considered: should the score stay fixed-weight or become adaptive immediately?
+
+Current answer: retain the existing weighted score for stability, add confidence, factor reasons, and score-delta tracking so future adaptive weighting has data to learn from.
+
+Implementation:
+
+- Contract: `stage_4_scoring`
+- Topic: `stockradar.scores`
+- Event types: `score.updated`, `score.delta`
+- Score history is persisted in `score_history`.
+
+### Stage 5: Backtest-Ready Logging
+
+Question considered: should backtesting be a separate run mode or captured continuously?
+
+Current answer: every scored stock now emits a replayable `backtest.snapshot` event containing score, signal, price, and volatility context.
+
+Implementation:
+
+- Contract: `stage_5_backtest_log`
+- Topic: `stockradar.backtest`
+- Event type: `backtest.snapshot`
+
+### Stage 6: ML Labeling Readiness
+
+Question considered: should ML training be implemented before enough labels exist?
+
+Current answer: no. The system now logs `ml.label_pending` events for 5-day, 10-day, and 20-day forward return labels. This creates the data trail needed for later model training without pretending the model exists today.
+
+Implementation:
+
+- Contract: `stage_6_ml_labeling`
+- Topic: `stockradar.ml`
+- Event type: `ml.label_pending`
+- `score_history` includes future label columns.
+
+### Stage 7: Deployment and Event Bus
+
+Question considered: should Kafka be mandatory?
+
+Current answer: no. The platform uses a local persistent bus by default and can publish to Kafka when `STOCKRADAR_EVENT_BUS=kafka` or `hybrid` is set. This matches the low-cost roadmap while keeping the architecture Kafka-ready.
+
+Implementation:
+
+- Contract: `stage_7_deployment`
+- Topic: `stockradar.deployment`
+- Event types: `pipeline.started`, `deployment.api_ready`, `pipeline.completed`
+- API endpoints:
+  - `GET /api/events`
+  - `GET /api/events/status`
+
+### Stage 8: Portfolio And Risk Controls
+
+Question considered: should risk remain just fields on the result row?
+
+Current answer: risk is now also an event stage. Each stock emits a `risk.updated` event after the risk engine applies stop-loss, target, position size, tradeability, and portfolio flags.
+
+Implementation:
+
+- Contract: `stage_8_portfolio_risk`
+- Topic: `stockradar.risk`
+- Event types: `risk.updated`, `portfolio.constraint`
+- Uses existing `core/risk/engine.py` portfolio limits:
+  - max single stock exposure: `10%`
+  - max sector exposure: `25%`
+  - max total portfolio exposure: `95%`
+
+### Event Tables
+
+DuckDB now contains:
+
+| Table | Purpose |
+|---|---|
+| `event_log` | Durable event audit trail for all eight stages |
+| `score_history` | Score momentum, backtest replay, and future ML labels |
+
+### Event Bus Configuration
+
+Default local mode:
+
+```powershell
+$env:STOCKRADAR_EVENT_BUS="local"
+```
+
+Kafka/hybrid mode:
+
+```powershell
+$env:STOCKRADAR_EVENT_BUS="kafka"
+$env:KAFKA_BOOTSTRAP_SERVERS="localhost:9092"
+```
+
+The existing `docker-compose.yml` already includes Kafka, Zookeeper, Redis, and Kafka UI.
