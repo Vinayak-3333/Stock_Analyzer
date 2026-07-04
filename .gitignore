@@ -41,3 +41,6 @@ desktop.ini
 *.log
 logs/
 output.txt
+
+# -- graphify knowledge graph output (generated) --
+graphify-out/
