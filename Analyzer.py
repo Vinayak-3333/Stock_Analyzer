@@ -19,7 +19,7 @@ Sends formatted Gmail alert with BUY / SELL / HOLD / WATCH signals.
 SETUP:
   pip install yfinance pandas ta requests schedule nsepy
 
-  Then fill in GMAIL_SENDER, GMAIL_APP_PASSWORD, and RECIPIENT_EMAIL below.
+  Set GMAIL_SENDER, GMAIL_APP_PASSWORD, and RECIPIENT_EMAIL in .env (project root).
   Get Gmail App Password: myaccount.google.com → Security → App Passwords
 """
 
@@ -55,9 +55,18 @@ http.client.HTTPConnection.debuglevel = 0
 # CONFIGURATION — Fill these in before running
 # ─────────────────────────────────────────────
 
-GMAIL_SENDER        = "vinnu.smath333@gmail.com"
-GMAIL_APP_PASSWORD  = "qatd oybr htuk eygb"   # 16-char app password, no spaces needed
-RECIPIENT_EMAIL     = "vinnu.smath333@gmail.com"
+# Credentials come from environment / .env at project root — never hardcode them.
+import os
+from pathlib import Path
+try:
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=str(Path(__file__).resolve().parent / ".env"), override=False)
+except Exception:
+    pass
+
+GMAIL_SENDER        = os.environ.get("GMAIL_SENDER", "")
+GMAIL_APP_PASSWORD  = os.environ.get("GMAIL_APP_PASSWORD", "")   # 16-char Gmail App Password
+RECIPIENT_EMAIL     = os.environ.get("RECIPIENT_EMAIL", GMAIL_SENDER)
 EMAIL_SUBJECT_PREFIX= "[StockRadar IN]"
 
 # Score threshold — only email stocks with score >= this
