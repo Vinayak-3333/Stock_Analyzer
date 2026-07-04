@@ -349,7 +349,15 @@ def _signal(score: float) -> str:
 
 
 def _result_from_features(symbol: str, features: dict, quote: dict, score_result: dict) -> dict:
-    score = _clean_number(score_result.get("final_score"), features.get("composite_score") or 50.0) or 50.0
+    score = _clean_number(score_result.get("final_score"))
+    if score is None:
+        score = _clean_number(features.get("composite_score"), 50.0)
+        if score_result.get("is_disqualified"):
+            # Mirror calculate_final_score(): disqualified stocks cap at SELL.
+            score = min(score, 30.0)
+        log.warning(
+            "final_score missing for %s - falling back to composite_score %.1f", symbol, score
+        )
     price = _clean_number(quote.get("lastPrice"), features.get("t_price") or 0.0)
     high_52w = _clean_number(quote.get("yearHigh"), features.get("t_high_52w") or price)
     low_52w = _clean_number(quote.get("yearLow"), features.get("t_low_52w") or price)

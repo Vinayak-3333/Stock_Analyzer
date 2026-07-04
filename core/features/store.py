@@ -12,6 +12,8 @@ import logging
 from typing import Optional
 import pandas as pd
 
+from core.scoring.hybrid import WEIGHTS
+
 log = logging.getLogger("stockradar.features.store")
 
 
@@ -102,7 +104,7 @@ def compute_all_features(
         except Exception as e:
             log.warning("Regime multiplier failed: %s", e)
 
-    # ── Composite Score (30/25/15/10 weighted) ────────────────────────────────
+    # ── Composite Score (weights shared with core.scoring.hybrid) ─────────────
     # Sector score derived from regime sector data
     sector_score = 50.0
     if regime and regime.get("sector_breadth"):
@@ -140,12 +142,12 @@ def compute_all_features(
     result["risk_score"] = round(risk_score, 1)
 
     composite = (
-        result["fundamental_score"]    * 0.30 +
-        result["technical_score"]      * 0.25 +
-        result["institutional_score"]  * 0.15 +
-        result["sentiment_score"]      * 0.10 +
-        sector_score                   * 0.10 +
-        risk_score                     * 0.10
+        result["fundamental_score"]    * WEIGHTS["fundamental"]   +
+        result["technical_score"]      * WEIGHTS["technical"]     +
+        result["institutional_score"]  * WEIGHTS["institutional"] +
+        result["sentiment_score"]      * WEIGHTS["sentiment"]     +
+        sector_score                   * WEIGHTS["sector"]        +
+        risk_score                     * WEIGHTS["risk"]
     )
 
     # Apply regime multiplier
