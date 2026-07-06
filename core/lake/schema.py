@@ -291,6 +291,26 @@ DDL_STATEMENTS = [
     )
     """,
 
+    # ── Fundamentals cache (full feature dict, TTL-refreshed weekly) ─────────
+    """
+    CREATE TABLE IF NOT EXISTS fundamentals_cache (
+        symbol          VARCHAR PRIMARY KEY,
+        as_of           DATE,
+        features_json   VARCHAR
+    )
+    """,
+
+    # ── Known symbols registry (dynamic stock universe cache) ───────────────
+    """
+    CREATE TABLE IF NOT EXISTS known_symbols (
+        symbol      VARCHAR PRIMARY KEY,
+        exchange    VARCHAR DEFAULT 'NSE',
+        series      VARCHAR DEFAULT 'EQ',
+        last_seen   DATE,
+        source      VARCHAR   -- 'nse_index', 'bhavcopy', 'manual'
+    )
+    """,
+
     # ── Indexes for common query patterns ─────────────────────────────────────
     "CREATE INDEX IF NOT EXISTS idx_ohlcv_sym_date     ON raw_ohlcv(symbol, date)",
     "CREATE INDEX IF NOT EXISTS idx_delivery_sym_date  ON raw_delivery(symbol, date)",

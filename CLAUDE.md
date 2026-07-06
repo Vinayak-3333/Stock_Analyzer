@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-StockRadar IN — an Indian stock market analyzer. A Python backend scans 120–165 NSE stocks, scores them with a multi-factor engine, persists results, and emails alerts on a schedule; a React dashboard displays the results.
+StockRadar IN — an Indian stock market analyzer. A Python backend scans up to ~2,000 NSE stocks in two tiers — Tier 1 screens the full universe (live quotes from 26 NSE indices, supplemented by bhavcopy / NSE equity-listing symbols via Yahoo, DuckDB-cached symbols as last-resort fallback) with technical scoring only, then Tier 2 runs deep analysis (fundamentals/news/delivery) on the top `DEEP_ANALYSIS_COUNT` (default 400), scores them with a multi-factor engine, persists results, and emails alerts on a schedule; a React dashboard displays the results.
 
 ## Commands
 
@@ -47,7 +47,7 @@ FastAPI + APScheduler. Cron-fires the modular pipeline at 09:15 and 15:30 IST on
 
 ### core/ module layout
 
-- `collectors/` — external data: `nse.py` (NSE live quotes, delivery %, FII/DII, options — requires a warmed-up session with browser headers), `market_data.py` (multi-provider fallback chain controlled by `MARKET_DATA_PROVIDER_ORDER`), `global_data.py`, `fundamentals.py`, `news.py`
+- `collectors/` — external data: `nse.py` (NSE live quotes from 26 indices, delivery %, FII/DII, options, bhavcopy — requires a warmed-up session with browser headers; also provides `fetch_equity_symbols_from_bhavcopy()`, `fetch_cached_symbols_from_lake()`, and `save_known_symbols_to_lake()` for dynamic symbol resolution), `market_data.py` (multi-provider fallback chain controlled by `MARKET_DATA_PROVIDER_ORDER` — includes Groww, Twelve Data, Alpha Vantage, FMP, Finnhub), `global_data.py`, `fundamentals.py`, `news.py`
 - `features/` — per-dimension feature computation (`technical`, `fundamental`, `institutional`, `sentiment`, `regime`), aggregated by `features/store.py`
 - `scoring/hybrid.py` — weighted 6-dimension score (fundamental 30%, technical 25%, institutional 15%, sentiment 10%, sector 10%, risk 10%) with a bull/bear regime multiplier; score maps to BUY (≥75) / WATCH (60–74) / HOLD (40–59) / SELL (<40)
 - `risk/engine.py` — ATR stops, Kelly sizing, applied to scored results
@@ -61,7 +61,7 @@ FinBERT (`transformers`/`torch`) and VectorBT are commented out in `requirements
 
 ### Configuration
 
-`.env` at the project root is loaded by both `backend/api.py` and `core/pipeline.py` (works regardless of launch CWD); missing keys are backfilled from `.env.nas.example`. Key vars: `GMAIL_SENDER` / `GMAIL_APP_PASSWORD` / `RECIPIENT_EMAIL`, market-data API keys (`FINNHUB_API_KEY`, `TWELVE_DATA_API_KEY`, `FMP_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `NEWSAPI_KEY`), `MARKET_DATA_PROVIDER_ORDER`, `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`.
+`.env` at the project root is loaded by both `backend/api.py` and `core/pipeline.py` (works regardless of launch CWD); missing keys are backfilled from `.env.nas.example`. Key vars: `GMAIL_SENDER` / `GMAIL_APP_PASSWORD` / `RECIPIENT_EMAIL`, market-data API keys (`FINNHUB_API_KEY`, `TWELVE_DATA_API_KEY`, `FMP_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `NEWSAPI_KEY`), `MARKET_DATA_PROVIDER_ORDER`, `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`, `DEEP_ANALYSIS_COUNT` (Tier-2 shortlist size, default 400), `FUNDAMENTALS_CACHE_TTL_DAYS` (DuckDB fundamentals cache TTL, default 7).
 
 ### Frontend (`frontend/`)
 

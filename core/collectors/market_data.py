@@ -14,6 +14,7 @@ from pathlib import Path
 import concurrent.futures
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote as _url_quote
 
 import requests
 
@@ -204,16 +205,51 @@ def fetch_fmp_quote(symbol: str) -> dict | None:
     return None
 
 
+def fetch_groww_quote(symbol: str) -> dict | None:
+    """Fetch real-time LTP + OHLC from Groww's free public API (no auth required)."""
+    try:
+        url = (
+            f"https://groww.in/v1/api/stocks_data/v1/accord_points/"
+            f"exchange/NSE/segment/CASH/latest_prices_ohlc/{_url_quote(symbol, safe='')}"
+        )
+        data = _get_json(url, {})
+        if not data or not isinstance(data, dict):
+            return None
+
+        last_price = _clean_number(data.get("ltp"))
+        if last_price is None or last_price <= 0:
+            return None
+
+        prev_close = _clean_number(data.get("close"), last_price)
+        return _quote_payload(
+            symbol,
+            "GROWW",
+            {
+                "lastPrice": last_price,
+                "open": data.get("open"),
+                "dayHigh": data.get("high"),
+                "dayLow": data.get("low"),
+                "previousClose": prev_close,
+                "pChange": data.get("dayChangePerc"),
+                "totalTradedVolume": data.get("volume"),
+            },
+        )
+    except Exception as exc:
+        log.debug("Groww quote failed for %s: %s", symbol, exc)
+        return None
+
+
 _PROVIDERS = {
     "alpha_vantage": fetch_alpha_vantage_quote,
     "finnhub": fetch_finnhub_quote,
     "twelve_data": fetch_twelve_data_quote,
     "fmp": fetch_fmp_quote,
+    "groww": fetch_groww_quote,
 }
 
 
 def configured_provider_names() -> list[str]:
-    raw = os.getenv("MARKET_DATA_PROVIDER_ORDER", "twelve_data,alpha_vantage,fmp,finnhub")
+    raw = os.getenv("MARKET_DATA_PROVIDER_ORDER", "twelve_data,alpha_vantage,fmp,finnhub,groww")
     return [name.strip().lower() for name in raw.split(",") if name.strip()]
 
 

@@ -136,6 +136,33 @@ def _get_delivery_history(symbol: str, days: int = 5) -> list[float]:
         return []
 
 
+def _get_latest_delivery_pct(symbol: str, max_age_days: int = 5) -> Optional[float]:
+    """
+    Latest delivery % for *symbol* from the lake (populated daily from the
+    NSE bhavcopy).  Returns ``None`` if the lake has nothing recent — the
+    caller then falls back to a live NSE fetch.
+    """
+    try:
+        from core.lake.manager import get_lake
+        conn = get_lake()
+        row = conn.execute(
+            """
+            SELECT delivery_pct
+            FROM raw_delivery
+            WHERE symbol = ?
+              AND delivery_pct IS NOT NULL
+              AND date >= current_date - ?
+            ORDER BY date DESC
+            LIMIT 1
+            """,
+            [symbol, max_age_days],
+        ).fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+    except Exception as exc:
+        log.debug("Lake latest delivery unavailable for %s: %s", symbol, exc)
+        return None
+
+
 def _get_fii_dii_history(days: int = 3) -> list[dict]:
     """
     Read the last *days* FII/DII records from the lake.
@@ -241,10 +268,16 @@ def compute_institutional_features(
 
     # ── 2. Delivery % ─────────────────────────────────────────────────────
     try:
-        delivery_data = _fetch_delivery_safe(session, symbol)
-        today_del_pct = _safe_float(
-            delivery_data.get("delivery_pct") if delivery_data else None
-        )
+        # Lake first (bhavcopy-fed, zero HTTP); live NSE fetch only as fallback
+        # so a 2,000-symbol run doesn't make 2,000 per-symbol NSE calls.
+        lake_pct = _get_latest_delivery_pct(symbol)
+        if lake_pct is not None:
+            today_del_pct = _safe_float(lake_pct)
+        else:
+            delivery_data = _fetch_delivery_safe(session, symbol)
+            today_del_pct = _safe_float(
+                delivery_data.get("delivery_pct") if delivery_data else None
+            )
         features["delivery_pct"] = round(today_del_pct, 2)
 
         # 5-day history from lake

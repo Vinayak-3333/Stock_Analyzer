@@ -16,8 +16,10 @@ to DuckDB / JSON.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 import random
 import time
 from typing import Any, Optional
@@ -93,11 +95,55 @@ def _rate_limit_sleep() -> None:
     time.sleep(random.uniform(0.1, 0.4))
 
 
+# ── Lake-backed cache ──────────────────────────────────────────────────────────
+# Fundamentals don't change intraday, so each symbol's feature dict is cached
+# in DuckDB and only re-fetched from yfinance after the TTL expires.
+
+FUNDAMENTALS_CACHE_TTL_DAYS = int(os.getenv("FUNDAMENTALS_CACHE_TTL_DAYS", "7"))
+
+
+def _load_cached_features(symbol: str) -> Optional[dict]:
+    """Return the cached feature dict for *symbol* if fresh, else None."""
+    try:
+        from core.lake.manager import get_lake
+        conn = get_lake()
+        # Stagger expiry by 0-2 days per symbol so a cold start doesn't make
+        # the whole shortlist expire (and re-fetch) on the same day.
+        ttl = FUNDAMENTALS_CACHE_TTL_DAYS + (sum(symbol.encode()) % 3)
+        row = conn.execute(
+            "SELECT features_json FROM fundamentals_cache "
+            "WHERE symbol = ? AND as_of >= current_date - ?",
+            [symbol, ttl],
+        ).fetchone()
+        if row and row[0]:
+            feats = json.loads(row[0])
+            if isinstance(feats, dict):
+                return feats
+    except Exception as exc:
+        log.debug("Fundamentals cache read failed for %s: %s", symbol, exc)
+    return None
+
+
+def _save_cached_features(symbol: str, features: dict) -> None:
+    try:
+        from core.lake.manager import get_lake
+        conn = get_lake()
+        conn.execute(
+            "INSERT OR REPLACE INTO fundamentals_cache (symbol, as_of, features_json) "
+            "VALUES (?, current_date, ?)",
+            [symbol, json.dumps(features)],
+        )
+        conn.commit()
+    except Exception as exc:
+        log.debug("Fundamentals cache write failed for %s: %s", symbol, exc)
+
+
 # ── Feature Extraction ────────────────────────────────────────────────────────
 
 def compute_fundamental_features(
     symbol: str,
     ticker: object = None,
+    use_cache: bool = True,
 ) -> dict:
     """
     Extract fundamental features for *symbol* from yfinance.
@@ -109,6 +155,10 @@ def compute_fundamental_features(
     ticker : object, optional
         Pre-created ``yf.Ticker`` instance.  When supplied the function
         re-uses it to avoid creating a duplicate HTTP session.
+    use_cache : bool
+        Serve/refresh the DuckDB fundamentals cache
+        (``FUNDAMENTALS_CACHE_TTL_DAYS``, default 7 days).  Pass ``False``
+        to force a live yfinance fetch.
 
     Returns
     -------
@@ -116,6 +166,11 @@ def compute_fundamental_features(
         Standardised feature dict.  Keys match ``_DEFAULTS``.
         On total failure every value falls back to its default.
     """
+    if use_cache:
+        cached = _load_cached_features(symbol)
+        if cached is not None:
+            return cached
+
     features: dict[str, Any] = dict(_DEFAULTS)
     features["symbol"] = symbol
 
@@ -290,6 +345,15 @@ def compute_fundamental_features(
                         features["current_ratio"] = round(ca / cl, 2)
         except Exception as exc:
             log.debug("Balance sheet fallback failed for %s: %s", symbol, exc)
+
+    # Cache only when the fetch yielded real data — caching a throttled/empty
+    # response would serve defaults for the whole TTL.
+    if use_cache and (
+        features.get("market_cap_cr") is not None
+        or features.get("pe_ratio") is not None
+        or features.get("roe") is not None
+    ):
+        _save_cached_features(symbol, features)
 
     log.info(
         "Fundamental features computed for %s — PE=%.1f  ROE=%s  D/E=%s",

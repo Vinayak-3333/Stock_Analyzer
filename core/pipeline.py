@@ -14,6 +14,7 @@ import concurrent.futures
 import logging
 import math
 import os
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,14 @@ except Exception:
     pass
 
 from core.collectors.market_data import collect_keyed_quotes
-from core.collectors.nse import _make_session, collect_all_quotes
+from core.collectors.nse import (
+    _UA,
+    _make_session,
+    collect_all_quotes,
+    fetch_cached_symbols_from_lake,
+    fetch_equity_symbols_from_bhavcopy,
+    save_known_symbols_to_lake,
+)
 from core.features.regime import compute_regime_features
 from core.features.store import compute_all_features
 from core.lake.manager import close_lake, get_lake
@@ -51,30 +59,9 @@ log = logging.getLogger("stockradar.pipeline")
 
 MAX_WORKERS = 8
 MIN_HISTORY_ROWS = 60
-FALLBACK_SYMBOLS = [
-    # NIFTY 50 core
-    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
-    "HINDUNILVR", "SBIN", "BAJFINANCE", "BHARTIARTL", "ITC",
-    "KOTAKBANK", "LT", "HCLTECH", "ASIANPAINT", "AXISBANK",
-    "MARUTI", "SUNPHARMA", "TITAN", "ULTRACEMCO", "WIPRO",
-    "TECHM", "NESTLEIND", "M&M", "POWERGRID", "NTPC",
-    "TATAPOWER", "JSWSTEEL", "ADANIENT", "ADANIPORTS", "COALINDIA",
-    "BAJAJFINSV", "BPCL", "BRITANNIA", "CIPLA", "DIVISLAB",
-    "DRREDDY", "EICHERMOT", "GRASIM", "HDFCLIFE", "HEROMOTOCO",
-    "HINDALCO", "INDUSINDBK", "ONGC", "SBILIFE", "SHREECEM",
-    "TATACONSUM", "TATASTEEL", "UPL", "VEDL", "BAJAJ-AUTO",
-    # NIFTY IT
-    "LTTS", "MPHASIS", "PERSISTENT", "COFORGE", "OFSS",
-    # NIFTY BANK
-    "FEDERALBNK", "IDFCFIRSTB", "BANDHANBNK", "PNB", "CANBK",
-    # NIFTY PHARMA
-    "AUROPHARMA", "BIOCON", "LUPIN", "TORNTPHARM", "ALKEM",
-    # NIFTY MIDCAP
-    "PIIND", "ATUL", "DEEPAKNTR", "AAVAS", "ASTRAL",
-    "CROMPTON", "DMART", "ESCORTS", "GLAND", "JUBLFOOD",
-    "LALPATHLAB", "METROPOLIS", "MUTHOOTFIN", "NAVINFLUOR", "POLYMED",
-    "SYNGENE", "TATACOMM", "TRENT", "VBL", "ZYDUSLIFE",
-]
+MAX_SYMBOL_COUNT = 2000   # Tier-1 universe: screened with technicals only
+DEEP_ANALYSIS_COUNT = int(os.getenv("DEEP_ANALYSIS_COUNT", "400"))  # Tier-2: full deep analysis
+TIER1_CHUNK_SIZE = 100    # symbols per bulk yf.download call in the Tier-1 screen
 
 
 def _clean_number(value: Any, default: float | None = None) -> float | None:
@@ -100,6 +87,68 @@ def _download_history(symbol: str) -> pd.DataFrame | None:
     except Exception as exc:
         log.warning("History download failed for %s: %s", symbol, exc)
         return None
+
+
+def _bulk_download_histories(symbols: list[str]) -> dict[str, pd.DataFrame]:
+    """
+    Download 1y daily OHLCV for many symbols via chunked bulk yf.download
+    calls (one request batch per TIER1_CHUNK_SIZE symbols) instead of one
+    call per symbol.  Returns {raw_symbol: DataFrame} for symbols with at
+    least MIN_HISTORY_ROWS rows.
+    """
+    histories: dict[str, pd.DataFrame] = {}
+    for start in range(0, len(symbols), TIER1_CHUNK_SIZE):
+        chunk = symbols[start:start + TIER1_CHUNK_SIZE]
+        yf_syms = [s if s.endswith(".NS") else f"{s}.NS" for s in chunk]
+        try:
+            df = yf.download(
+                yf_syms, period="1y", interval="1d",
+                progress=False, auto_adjust=True,
+                group_by="ticker", threads=True,
+            )
+        except Exception as exc:
+            log.warning("Bulk history chunk %d–%d failed: %s", start, start + len(chunk), exc)
+            continue
+        if df is None or df.empty:
+            continue
+        multi = isinstance(df.columns, pd.MultiIndex)
+        for raw_sym, yf_sym in zip(chunk, yf_syms):
+            try:
+                sub = df[yf_sym] if multi else df
+                sub = sub.dropna(how="all")
+                if len(sub) >= MIN_HISTORY_ROWS:
+                    histories[raw_sym] = sub
+            except Exception:
+                continue
+    log.info(
+        "Tier-1 bulk history: %d/%d symbols with >=%d rows",
+        len(histories), len(symbols), MIN_HISTORY_ROWS,
+    )
+    return histories
+
+
+def _screen_universe(
+    symbols: list[str],
+    nifty_df: pd.DataFrame | None,
+) -> list[tuple[str, float, pd.DataFrame]]:
+    """
+    Tier 1: technical-only screen over the whole universe — no per-symbol
+    HTTP beyond the chunked bulk history download.  Returns
+    (symbol, technical_score, history_df) tuples sorted best-first; the
+    history is reused by Tier 2 so it is downloaded only once.
+    """
+    from core.features.technical import compute_technical_features, compute_technical_score
+
+    histories = _bulk_download_histories(symbols)
+    screened: list[tuple[str, float, pd.DataFrame]] = []
+    for sym, df in histories.items():
+        try:
+            tech = compute_technical_features(df, nifty_df)
+            screened.append((sym, compute_technical_score(tech), df))
+        except Exception as exc:
+            log.debug("Tier-1 screen failed for %s: %s", sym, exc)
+    screened.sort(key=lambda item: item[1], reverse=True)
+    return screened
 
 
 def _fallback_quotes_from_yfinance(symbols: list[str]) -> dict[str, dict]:
@@ -421,10 +470,10 @@ def _result_from_features(symbol: str, features: dict, quote: dict, score_result
     return result
 
 
-def analyse_symbol(symbol: str, quote: dict, nifty_df: pd.DataFrame | None, regime: dict | None, market: dict, session: object) -> dict | None:
+def analyse_symbol(symbol: str, quote: dict, nifty_df: pd.DataFrame | None, regime: dict | None, market: dict, session: object, history: pd.DataFrame | None = None) -> dict | None:
     try:
         yf_symbol = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
-        df = _download_history(yf_symbol)
+        df = history if history is not None else _download_history(yf_symbol)
         if df is None:
             return None
 
@@ -456,6 +505,120 @@ def analyse_symbol(symbol: str, quote: dict, nifty_df: pd.DataFrame | None, regi
         close_lake()
 
 
+def _fetch_broad_nse_symbols() -> list[str]:
+    """
+    Download the full NSE equity listing CSV (~2,200 symbols).
+    This is a lightweight CSV hosted by NSE — not rate-limited.
+    """
+    try:
+        import requests as _req
+        import io
+        r = _req.get(
+            "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
+            headers={"User-Agent": _UA},
+            timeout=15,
+        )
+        if r.status_code == 200 and len(r.content) > 1000:
+            eq_df = pd.read_csv(io.StringIO(r.text))
+            eq_df.columns = eq_df.columns.str.strip()
+            if "SERIES" in eq_df.columns:
+                eq_df = eq_df[eq_df["SERIES"].str.strip() == "EQ"]
+            if "SYMBOL" in eq_df.columns:
+                symbols = sorted(eq_df["SYMBOL"].str.strip().unique().tolist())
+                log.info("NSE equity listing CSV: %d symbols", len(symbols))
+                return symbols
+    except Exception as exc:
+        log.debug("NSE equity listing CSV download failed: %s", exc)
+    return []
+
+
+def _resolve_symbols_and_quotes(session) -> tuple[dict[str, dict], str]:
+    """
+    Build the broadest possible stock universe (~2000 stocks).
+
+    Strategy (supplementary, not fallback):
+        1. Start with NSE live index quotes (~350 stocks with best data)
+        2. Supplement with bhavcopy / NSE equity listing symbols
+           → fetch Yahoo quotes for the additional symbols
+        3. If everything external fails, use DuckDB lake cache
+
+    Returns (quotes_dict, source_label).
+    """
+    quotes: dict[str, dict] = {}
+    sources_used: list[str] = []
+
+    # ── Step 1: NSE live index quotes (primary — best data quality) ───────────
+    nse_quotes = collect_all_quotes(session)
+    if nse_quotes:
+        quotes.update(nse_quotes)
+        sources_used.append(f"nse_live({len(nse_quotes)})")
+        log.info("Step 1: NSE live quotes — %d stocks", len(nse_quotes))
+
+    # ── Step 2: Supplement with bhavcopy / equity listing symbols ─────────────
+    # Even if NSE live worked, we want MORE symbols to reach ~2000
+    additional_symbols: list[str] = []
+
+    # 2a: Try bhavcopy (gives ~1,800 EQ symbols)
+    bhav_symbols = fetch_equity_symbols_from_bhavcopy()
+    if bhav_symbols:
+        # Only keep symbols not already in NSE live quotes
+        new_from_bhav = [s for s in bhav_symbols if s not in quotes]
+        additional_symbols.extend(new_from_bhav)
+        log.info("Step 2a: Bhavcopy — %d new symbols (already have %d)",
+                 len(new_from_bhav), len(quotes))
+
+    # 2b: Try NSE equity listing CSV (gives ~2,200 symbols)
+    if len(quotes) + len(additional_symbols) < MAX_SYMBOL_COUNT:
+        csv_symbols = _fetch_broad_nse_symbols()
+        if csv_symbols:
+            existing = set(quotes.keys()) | set(additional_symbols)
+            new_from_csv = [s for s in csv_symbols if s not in existing]
+            additional_symbols.extend(new_from_csv)
+            log.info("Step 2b: NSE equity CSV — %d new symbols",
+                     len(new_from_csv))
+
+    # Cap the additional symbols so total doesn't exceed MAX_SYMBOL_COUNT.
+    # Shuffle before capping so coverage rotates across runs instead of
+    # permanently excluding late-alphabet symbols.
+    remaining_capacity = MAX_SYMBOL_COUNT - len(quotes)
+    if remaining_capacity > 0 and additional_symbols:
+        if len(additional_symbols) > remaining_capacity:
+            random.shuffle(additional_symbols)
+        additional_symbols = additional_symbols[:remaining_capacity]
+        log.info(
+            "Fetching Yahoo quotes for %d supplementary symbols (target: %d total)",
+            len(additional_symbols), len(quotes) + len(additional_symbols),
+        )
+        yahoo_quotes = _fallback_quotes_from_yfinance(additional_symbols)
+        if yahoo_quotes:
+            quotes.update(yahoo_quotes)
+            sources_used.append(f"yahoo_supplement({len(yahoo_quotes)})")
+
+    # ── Step 3: If we still have nothing, try lake cache ──────────────────────
+    if not quotes:
+        log.warning("NSE + bhavcopy + equity CSV all failed — trying lake cache")
+        cached_symbols = fetch_cached_symbols_from_lake(max_age_days=7)
+        if cached_symbols:
+            cached_symbols = cached_symbols[:MAX_SYMBOL_COUNT]
+            log.info("Lake cached symbols: %d — fetching via Yahoo", len(cached_symbols))
+            quotes = _fallback_quotes_from_yfinance(cached_symbols)
+            if quotes:
+                sources_used.append(f"lake_cache({len(quotes)})")
+
+    # ── Persist symbols for future runs ───────────────────────────────────────
+    if quotes:
+        source_tag = "+".join(sources_used) if sources_used else "unknown"
+        save_known_symbols_to_lake(list(quotes.keys()), source=source_tag[:50])
+        log.info(
+            "Symbol resolution complete: %d stocks [%s]",
+            len(quotes), source_tag,
+        )
+        return quotes, source_tag
+
+    log.error("All symbol resolution sources failed — no stocks to analyse")
+    return {}, "none"
+
+
 def run_modular_analysis(limit: int | None = None) -> list[dict]:
     """
     Run the full modular analysis pipeline and return API-ready stock results.
@@ -472,30 +635,45 @@ def run_modular_analysis(limit: int | None = None) -> list[dict]:
         )
 
         session = _make_session()
-        quotes = collect_all_quotes(session)
+
+        # ── Dynamic symbol resolution (no hardcoded fallback) ─────────────────
+        quotes, source_label = _resolve_symbols_and_quotes(session)
         if not quotes:
-            log.warning(
-                "NSE live quotes unavailable (blocked/rate-limited) — "
-                "using Yahoo Finance for %d NSE symbols", len(FALLBACK_SYMBOLS)
-            )
-            quotes = _fallback_quotes_from_yfinance(FALLBACK_SYMBOLS)
-        if not quotes:
-            log.warning("Yahoo Finance also failed; using stub watchlist for %d symbols", len(FALLBACK_SYMBOLS))
-            quotes = {sym: {"symbol": sym, "companyName": sym, "industry": ""} for sym in FALLBACK_SYMBOLS}
+            log.error("No quotes obtained from any source — aborting pipeline")
+            return []
+        log.info(
+            "Stock universe: %d symbols (source: %s, cap: %s)",
+            len(quotes), source_label, limit or MAX_SYMBOL_COUNT,
+        )
 
         symbols = sorted(quotes.keys())
         if limit:
             symbols = symbols[:limit]
+        elif len(symbols) > MAX_SYMBOL_COUNT:
+            symbols = symbols[:MAX_SYMBOL_COUNT]
+            log.info("Capped symbol list to %d (MAX_SYMBOL_COUNT)", MAX_SYMBOL_COUNT)
 
         regime = compute_regime_features()
         market = _market_payload(regime)
         nifty_df = _download_history("^NSEI")
 
+        # ── Tier 1: cheap technical screen over the full universe ──────────────
+        screened = _screen_universe(symbols, nifty_df)
+        screened_count = len(screened)
+        deep_count = limit if limit else DEEP_ANALYSIS_COUNT
+        shortlist = screened[:deep_count]
+        del screened  # free the histories of symbols that didn't make the cut
+        log.info(
+            "Tier 1: screened %d/%d symbols — deep-analysing top %d",
+            screened_count, len(symbols), len(shortlist),
+        )
+
+        # ── Tier 2: full deep analysis (fundamentals/news/delivery) on top N ──
         results: list[dict] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {
-                executor.submit(analyse_symbol, sym, quotes.get(sym, {}), nifty_df, regime, market, session): sym
-                for sym in symbols
+                executor.submit(analyse_symbol, sym, quotes.get(sym, {}), nifty_df, regime, market, session, df): sym
+                for sym, _tech_score, df in shortlist
             }
             for future in concurrent.futures.as_completed(futures):
                 sym = futures[future]
@@ -521,10 +699,17 @@ def run_modular_analysis(limit: int | None = None) -> list[dict]:
             StockEvent(
                 stage=PipelineStage.DEPLOYMENT,
                 event_type=EventType.PIPELINE_COMPLETED,
-                payload={"processed": len(results), "requested": len(symbols)},
+                payload={
+                    "processed": len(results),
+                    "screened": screened_count,
+                    "requested": len(symbols),
+                },
             )
         )
-        log.info("Modular analysis complete: %d/%d stocks processed", len(results), len(symbols))
+        log.info(
+            "Modular analysis complete: %d/%d stocks processed (source: %s)",
+            len(results), len(symbols), source_label,
+        )
         return results
     finally:
         close_lake()

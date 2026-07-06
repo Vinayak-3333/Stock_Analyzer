@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import xml.etree.ElementTree as ET
 from typing import List, Optional
 from urllib.parse import quote_plus
@@ -198,8 +199,20 @@ def _fetch_google_news_rss(query: str) -> List[str]:
     return headlines
 
 
+_ET_RSS_TTL_SECONDS = 900
+_et_rss_cache: tuple[float, List[str]] | None = None
+
+
 def _fetch_et_rss() -> List[str]:
-    """Fetch general Indian market headlines from Economic Times RSS."""
+    """Fetch general Indian market headlines from Economic Times RSS.
+
+    The feed is market-wide, not per-symbol, so one fetch is cached
+    in-process and shared by every symbol in a run.
+    """
+    global _et_rss_cache
+    if _et_rss_cache is not None and time.time() - _et_rss_cache[0] < _ET_RSS_TTL_SECONDS:
+        return _et_rss_cache[1]
+
     headlines: List[str] = []
     url = "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"
     try:
@@ -213,6 +226,8 @@ def _fetch_et_rss() -> List[str]:
                 headlines.append(el.text)
     except Exception as exc:
         log.debug("Economic Times RSS failed: %s", exc)
+    if headlines:
+        _et_rss_cache = (time.time(), headlines)
     return headlines
 
 

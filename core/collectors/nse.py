@@ -40,17 +40,37 @@ _UA         = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+# ── Broad + Sector indices for dynamic stock universe (~300-500 unique) ────────
 NSE_INDEX_MAP = {
-    "NIFTY 50":       "NIFTY 50",
-    "NIFTY MIDCAP 50":"NIFTY MIDCAP 50",
-    "NIFTY SMLCAP 50":"NIFTY SMLCAP 50",
-    "NIFTY IT":       "NIFTY IT",
-    "NIFTY BANK":     "NIFTY BANK",
-    "NIFTY PHARMA":   "NIFTY PHARMA",
-    "NIFTY AUTO":     "NIFTY AUTO",
-    "NIFTY FMCG":     "NIFTY FMCG",
-    "NIFTY METAL":    "NIFTY METAL",
-    "NIFTY REALTY":   "NIFTY REALTY",
+    # Broad market (core coverage — ~300 unique stocks)
+    "NIFTY 50":            "NIFTY 50",
+    "NIFTY NEXT 50":       "NIFTY NEXT 50",
+    "NIFTY MIDCAP 50":     "NIFTY MIDCAP 50",
+    "NIFTY MIDCAP 100":    "NIFTY MIDCAP 100",
+    "NIFTY SMLCAP 50":     "NIFTY SMLCAP 50",
+    "NIFTY SMLCAP 100":    "NIFTY SMLCAP 100",
+    # Sector indices (add ~50-100 unique stocks not in broad indices)
+    "NIFTY IT":            "NIFTY IT",
+    "NIFTY BANK":          "NIFTY BANK",
+    "NIFTY PHARMA":        "NIFTY PHARMA",
+    "NIFTY AUTO":          "NIFTY AUTO",
+    "NIFTY FMCG":          "NIFTY FMCG",
+    "NIFTY METAL":         "NIFTY METAL",
+    "NIFTY REALTY":        "NIFTY REALTY",
+    "NIFTY ENERGY":        "NIFTY ENERGY",
+    "NIFTY INFRA":         "NIFTY INFRA",
+    "NIFTY MEDIA":         "NIFTY MEDIA",
+    "NIFTY COMMODITIES":   "NIFTY COMMODITIES",
+    "NIFTY CONSUMPTION":   "NIFTY CONSUMPTION",
+    "NIFTY FIN SERVICE":   "NIFTY FIN SERVICE",
+    "NIFTY HEALTHCARE":    "NIFTY HEALTHCARE",
+    "NIFTY PVT BANK":      "NIFTY PVT BANK",
+    "NIFTY PSU BANK":      "NIFTY PSU BANK",
+    "NIFTY CPSE":          "NIFTY CPSE",
+    "NIFTY MNC":           "NIFTY MNC",
+    # Thematic (add a few more unique names)
+    "NIFTY OIL AND GAS":   "NIFTY OIL AND GAS",
+    "NIFTY GROWSECT 15":   "NIFTY GROWSECT 15",
 }
 
 
@@ -408,8 +428,8 @@ def fetch_bhavcopy(target_date: date = None) -> Optional[pd.DataFrame]:
     if target_date is None:
         target_date = date.today()
 
-    # Try last 3 days in case of weekends/holidays
-    for offset in range(3):
+    # Try last 5 days so Monday/post-holiday runs still find the last trading day's file
+    for offset in range(5):
         d = target_date - timedelta(days=offset)
         url = (
             f"https://nsearchives.nseindia.com/products/content/"
@@ -549,6 +569,126 @@ def run_full_collection(
 
     log.info("NSE collection complete: %s", summary)
     return summary
+
+
+# ── 6. Dynamic symbol helpers (for pipeline cascading) ───────────────────────
+
+def fetch_equity_symbols_from_bhavcopy(target_date: date = None) -> list[str]:
+    """
+    Download today's bhavcopy and extract all unique EQ-series symbols.
+    Returns a list of NSE symbols (e.g. ['RELIANCE', 'TCS', ...]).
+    This gives the full ~1,800+ NSE equity universe.
+    """
+    df = fetch_bhavcopy(target_date)
+    if df is None or df.empty:
+        return []
+    # The downloaded file also carries OHLC + delivery for every symbol —
+    # persist it so the feature layers can read delivery from the lake
+    # instead of making per-symbol NSE calls.
+    try:
+        save_bhavcopy_to_lake(df)
+    except Exception as exc:
+        log.debug("Bhavcopy lake save failed: %s", exc)
+    # Filter EQ series only (skip BE, BZ, derivatives, etc.)
+    if "series" in df.columns:
+        eq_df = df[df["series"].str.strip() == "EQ"]
+    else:
+        eq_df = df
+    if "symbol" not in eq_df.columns:
+        return []
+    symbols = sorted(eq_df["symbol"].str.strip().unique().tolist())
+    log.info("Bhavcopy yielded %d EQ symbols", len(symbols))
+    return symbols
+
+
+def fetch_cached_symbols_from_lake(max_age_days: int = 7) -> list[str]:
+    """
+    Query the DuckDB lake for symbols seen in recent runs.
+    Falls back to raw_ohlcv / raw_bhavcopy if known_symbols is empty.
+    Returns a list of NSE symbols.
+    """
+    try:
+        from core.lake.manager import get_lake
+        conn = get_lake()
+
+        # Try known_symbols table first
+        try:
+            result = conn.execute(
+                "SELECT symbol FROM known_symbols "
+                "WHERE last_seen >= current_date - ? "
+                "ORDER BY symbol",
+                [max_age_days],
+            ).fetchall()
+            if result:
+                symbols = [row[0] for row in result]
+                log.info("Lake known_symbols: %d symbols (last %d days)", len(symbols), max_age_days)
+                return symbols
+        except Exception as exc:
+            log.debug("known_symbols query failed: %s", exc)  # table may not exist yet
+
+        # Fallback: distinct symbols from raw_ohlcv
+        try:
+            result = conn.execute(
+                "SELECT DISTINCT symbol FROM raw_ohlcv "
+                "WHERE date >= current_date - ? "
+                "ORDER BY symbol",
+                [max_age_days],
+            ).fetchall()
+            if result:
+                symbols = [row[0] for row in result]
+                log.info("Lake raw_ohlcv fallback: %d symbols", len(symbols))
+                return symbols
+        except Exception as exc:
+            log.debug("raw_ohlcv symbol query failed: %s", exc)
+
+        # Fallback: distinct symbols from raw_bhavcopy
+        try:
+            result = conn.execute(
+                "SELECT DISTINCT symbol FROM raw_bhavcopy "
+                "WHERE date >= current_date - ? "
+                "  AND series = 'EQ' "
+                "ORDER BY symbol",
+                [max_age_days],
+            ).fetchall()
+            if result:
+                symbols = [row[0] for row in result]
+                log.info("Lake raw_bhavcopy fallback: %d symbols", len(symbols))
+                return symbols
+        except Exception as exc:
+            log.debug("raw_bhavcopy symbol query failed: %s", exc)
+
+    except Exception as exc:
+        log.debug("Lake symbol cache query failed: %s", exc)
+    return []
+
+
+def save_known_symbols_to_lake(symbols: list[str], source: str = "nse_index") -> None:
+    """
+    Persist a symbol list to the known_symbols table.
+    Called after every successful symbol resolution so the next run
+    always has a cached fallback.
+    """
+    if not symbols:
+        return
+    try:
+        from core.lake.manager import get_lake
+        conn = get_lake()
+        today = date.today().isoformat()
+        df = pd.DataFrame({
+            "symbol": symbols,
+            "exchange": "NSE",
+            "series": "EQ",
+            "last_seen": today,
+            "source": source,
+        })
+        conn.execute("""
+            INSERT OR REPLACE INTO known_symbols (symbol, exchange, series, last_seen, source)
+            SELECT symbol, exchange, series, last_seen::DATE, source FROM df
+        """)
+        conn.commit()
+        log.info("Saved %d symbols to known_symbols (source=%s)", len(symbols), source)
+    except Exception as exc:
+        log.debug("Failed to save known symbols: %s", exc)
 
 
 if __name__ == "__main__":
