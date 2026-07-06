@@ -13,9 +13,10 @@ build/
 .eggs/
 
 # ── StockRadar secrets (NEVER commit these) ───────────────────────────────────
-# Edit Analyzer.py locally — do NOT commit real credentials
-# backend secrets
+# Real credentials live only in .env / .env.nas (.env.nas.example is the
+# committed template)
 .env.local
+.env.nas
 
 # ── Database (generated at runtime) ──────────────────────────────────────────
 backend/data/
