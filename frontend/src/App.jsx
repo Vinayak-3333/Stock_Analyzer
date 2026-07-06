@@ -1,13 +1,12 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useSyncExternalStore } from 'react'
 import axios from 'axios'
 import {
-  AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, RadialBarChart, RadialBar, Cell
 } from 'recharts'
 import {
   TrendingUp, TrendingDown, Eye, Zap, RefreshCw, Clock,
-  Newspaper, BarChart2, X, ChevronUp, ChevronDown, Activity,
-  CheckCircle, AlertTriangle, MinusCircle
+  X, ChevronUp, ChevronDown, AlertTriangle, Search, Trophy
 } from 'lucide-react'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
@@ -26,6 +25,50 @@ const getNewsScore = s => {
 }
 const trendColor = v => v > 0 ? 'pos' : v < 0 ? 'neg' : 'neu'
 
+// ── useNow — wall-clock time, quantised to stepMs so renders stay stable ─────
+function useNow(stepMs = 30_000) {
+  const tick = useSyncExternalStore(
+    onStoreChange => {
+      const t = setInterval(onStoreChange, stepMs)
+      return () => clearInterval(t)
+    },
+    () => Math.floor(Date.now() / stepMs),
+  )
+  return tick * stepMs
+}
+
+// ── useCountUp — animates a number from 0 to target ──────────────────────────
+function useCountUp(target, duration = 700) {
+  const [val, setVal] = useState(0)
+  useEffect(() => {
+    const n = Number(target) || 0
+    let raf
+    const t0 = performance.now()
+    const step = now => {
+      const p = Math.min((now - t0) / duration, 1)
+      setVal(Math.round(n * (1 - Math.pow(1 - p, 3))))   // ease-out cubic
+      if (p < 1) raf = requestAnimationFrame(step)
+    }
+    raf = requestAnimationFrame(step)
+    return () => cancelAnimationFrame(raf)
+  }, [target, duration])
+  return val
+}
+
+// ── SummaryCard ───────────────────────────────────────────────────────────────
+function SummaryCard({ type, icon, count, label, delay = 0 }) {
+  const n = useCountUp(count)
+  return (
+    <div className={`summary-card ${type} rise`} style={{ animationDelay: `${delay}s` }}>
+      <div className={`summary-icon ${type}`}>{icon}</div>
+      <div>
+        <div className={`summary-num ${type}`}>{n}</div>
+        <div className="summary-label">{label}</div>
+      </div>
+    </div>
+  )
+}
+
 // ── ScoreBar ──────────────────────────────────────────────────────────────────
 function ScoreBar({ score }) {
   const color = scoreColor(score)
@@ -33,7 +76,11 @@ function ScoreBar({ score }) {
     <div style={{ display:'flex', alignItems:'center', gap:8 }}>
       <div className="score-bar-wrap">
         <div className="score-bar-bg">
-          <div className="score-bar-fill" style={{ width:`${score}%`, background:color }} />
+          <div className="score-bar-fill" style={{
+            width:`${score}%`,
+            background:`linear-gradient(90deg, ${color}99, ${color})`,
+            boxShadow:`0 0 6px ${color}66`,
+          }} />
         </div>
       </div>
       <span style={{ fontFamily:'var(--mono)', fontSize:12, color, fontWeight:700 }}>{fmt(score,0)}</span>
@@ -50,6 +97,16 @@ function NewsIcon({ sentiment }) {
 
 // ── StockModal ────────────────────────────────────────────────────────────────
 function StockModal({ stock, onClose }) {
+  useEffect(() => {
+    const onKey = e => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = ''
+    }
+  }, [onClose])
+
   if (!stock) return null
   const newsScore = getNewsScore(stock)
   const technicals = [
@@ -78,9 +135,6 @@ function StockModal({ stock, onClose }) {
     { k:'% from High',     v: fmtPct(-stock.pct_from_52w_high), cls:'neg' },
     { k:'% from Low',      v: fmtPct(stock.pct_from_52w_low), cls:'pos' },
   ]
-
-  // Gauge data
-  const gaugeData = [{ value: stock.score, fill: scoreColor(stock.score) }]
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -166,13 +220,17 @@ function StockModal({ stock, onClose }) {
 }
 
 // ── StocksTable ───────────────────────────────────────────────────────────────
-function StocksTable({ stocks, filter, title, colorClass }) {
+function StocksTable({ stocks, filter, title, colorClass, query }) {
   const [sortKey, setSortKey] = useState('score')
   const [sortDir, setSortDir] = useState(-1)
   const [selected, setSelected] = useState(null)
 
+  const q = (query || '').trim().toUpperCase()
   const enriched = stocks.map(s => ({ ...s, news_score: getNewsScore(s) }))
-  const filtered = enriched.filter(s => !filter || s.signal === filter)
+  const filtered = enriched.filter(s =>
+    (!filter || s.signal === filter) &&
+    (!q || s.symbol?.toUpperCase().includes(q) || (s.company_name || '').toUpperCase().includes(q))
+  )
   const sorted = [...filtered].sort((a,b) => {
     const av = a[sortKey] ?? -999, bv = b[sortKey] ?? -999
     return typeof av === 'string' ? av.localeCompare(bv)*sortDir : (bv-av)*-sortDir
@@ -190,10 +248,10 @@ function StocksTable({ stocks, filter, title, colorClass }) {
   return (
     <>
       {selected && <StockModal stock={selected} onClose={() => setSelected(null)} />}
-      <div>
+      <div className="rise">
         <div className="section-header">
           <div className="section-title">
-            {colorClass === 'buy' ? '🟢' : colorClass === 'sell' ? '🔴' : '🔵'} {title}
+            {colorClass === 'buy' ? '🟢' : colorClass === 'sell' ? '🔴' : colorClass === 'hold' ? '⚪' : '🔵'} {title}
             <span>{sorted.length} stocks</span>
           </div>
         </div>
@@ -293,7 +351,7 @@ function MarketBar({ run }) {
   if (!run) return null
   const sc = run.sector_changes || {}
   return (
-    <div className="market-bar">
+    <div className="market-bar rise">
       <div className="market-tile">
         <div className="market-tile-label">NIFTY 50</div>
         <div className={`market-tile-value ${trendColor(run.nifty_change)}`}>{fmtPct(run.nifty_change)}</div>
@@ -355,6 +413,8 @@ export default function App() {
   const [backendOff, setBackendOff] = useState(false)
   const [pollTimer,  setPollTimer]  = useState(null)
   const [tab, setTab] = useState('signals')   // 'signals' | 'history'
+  const [query, setQuery] = useState('')
+  const now = useNow()   // refreshes every 30s for the countdown chip
 
   const fetchAll = useCallback(async () => {
     try {
@@ -379,10 +439,10 @@ export default function App() {
     }
   }, [])
 
-  useEffect(() => { fetchAll() }, [fetchAll])
   useEffect(() => {
-    const t = setInterval(fetchAll, 30_000)   // refresh every 30s
-    return () => clearInterval(t)
+    const kickoff = setTimeout(fetchAll, 0)     // initial load
+    const t = setInterval(fetchAll, 30_000)     // refresh every 30s
+    return () => { clearTimeout(kickoff); clearInterval(t) }
   }, [fetchAll])
 
   // Clean up poll timer on unmount
@@ -431,6 +491,19 @@ export default function App() {
   const mktTrend  = run?.market_trend || 'NEUTRAL'
   const lastTime  = run?.run_time ? new Date(run.run_time).toLocaleString('en-IN') : null
 
+  const topPick = results.length
+    ? results.reduce((a, b) => (b.score > a.score ? b : a), results[0])
+    : null
+
+  const nextRunAt = (status?.scheduled_jobs || [])
+    .map(j => new Date(j.next_run).getTime())
+    .filter(t => t > now)
+    .sort((a, b) => a - b)[0]
+  const fmtEta = ms => {
+    const m = Math.max(1, Math.round(ms / 60000))
+    return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`
+  }
+
   return (
     <div className="app">
       {/* Backend offline warning */}
@@ -459,6 +532,11 @@ export default function App() {
           {isRunning && <span className="badge running">⚙ Analysing...</span>}
         </div>
         <div className="header-right">
+          {nextRunAt && !isRunning && (
+            <div className="next-run" title="Next scheduled analysis">
+              <Clock size={12}/> next run in {fmtEta(nextRunAt - now)}
+            </div>
+          )}
           {lastTime && <div className="last-update">Last run: {lastTime} IST</div>}
           <button className="trigger-btn" onClick={triggerRun} disabled={isRunning || backendOff}>
             {isRunning
@@ -468,13 +546,19 @@ export default function App() {
         </div>
       </header>
 
+      {isRunning && <div className="progress-line" />}
+
       <main className="main">
         {loading && (
-          <div className="empty">
-            <div className="empty-icon">⚙️</div>
-            <div className="empty-msg">Loading dashboard…</div>
-            <div className="empty-sub">Connecting to StockRadar API</div>
-          </div>
+          <>
+            <div className="summary-row">
+              {[0, 1, 2, 3].map(i => (
+                <div key={i} className="skeleton" style={{ height: 94, animationDelay: `${i * 0.1}s` }} />
+              ))}
+            </div>
+            <div className="skeleton" style={{ height: 110 }} />
+            <div className="skeleton" style={{ height: 340 }} />
+          </>
         )}
 
         {!loading && !run && !isRunning && (
@@ -503,31 +587,24 @@ export default function App() {
 
             {/* Summary Cards */}
             <div className="summary-row">
-              <div className="summary-card buy">
-                <div className="summary-icon buy"><TrendingUp size={24} color="var(--green)"/></div>
-                <div>
-                  <div className="summary-num buy">{buys.length}</div>
-                  <div className="summary-label">BUY Signals</div>
+              <SummaryCard type="buy"   icon={<TrendingUp size={24} color="var(--green)"/>}  count={buys.length}    label="BUY Signals" />
+              <SummaryCard type="watch" icon={<Eye size={24} color="var(--blue)"/>}          count={watches.length} label="WATCH List"  delay={0.06} />
+              <SummaryCard type="sell"  icon={<TrendingDown size={24} color="var(--red)"/>}  count={sells.length}   label="SELL Signals" delay={0.12} />
+              {topPick && (
+                <div className="summary-card pick rise" style={{ animationDelay: '0.18s' }}>
+                  <div className="summary-icon pick"><Trophy size={24} color="var(--purple)"/></div>
+                  <div>
+                    <div className="summary-num pick" style={{ fontSize: 24 }}>{topPick.symbol}</div>
+                    <div className="summary-label">
+                      Top Pick · Score {fmt(topPick.score, 0)} · <span className={`signal-pill ${topPick.signal}`} style={{ fontSize: 10, padding: '1px 8px' }}>{topPick.signal}</span>
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <div className="summary-card watch">
-                <div className="summary-icon watch"><Eye size={24} color="var(--blue)"/></div>
-                <div>
-                  <div className="summary-num watch">{watches.length}</div>
-                  <div className="summary-label">WATCH List</div>
-                </div>
-              </div>
-              <div className="summary-card sell">
-                <div className="summary-icon sell"><TrendingDown size={24} color="var(--red)"/></div>
-                <div>
-                  <div className="summary-num sell">{sells.length}</div>
-                  <div className="summary-label">SELL Signals</div>
-                </div>
-              </div>
+              )}
             </div>
 
             {/* Score dist chart + quick stats */}
-            <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:16}}>
+            <div className="rise" style={{display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(300px, 1fr))', gap:16, animationDelay:'0.1s'}}>
               <ScoreDistChart results={results} />
               <div className="modal-box" style={{padding:'16px 18px'}}>
                 <div className="modal-box-title">Analysis Summary</div>
@@ -549,24 +626,34 @@ export default function App() {
               </div>
             </div>
 
-            {/* Tabs */}
-            <div style={{display:'flex', gap:8}}>
-              {[['signals','📊 Signals'], ['history','🕐 History']].map(([key, label]) => (
-                <button key={key} onClick={() => setTab(key)} style={{
-                  padding:'8px 18px', borderRadius:8, border:'1px solid',
-                  borderColor: tab===key ? 'var(--blue)' : 'var(--border)',
-                  background: tab===key ? 'var(--blue-dim)' : 'var(--bg-card)',
-                  color: tab===key ? 'var(--blue)' : 'var(--text-2)',
-                  cursor:'pointer', fontSize:13, fontWeight:600, transition:'all 0.15s'
-                }}>{label}</button>
-              ))}
+            {/* Tabs + search */}
+            <div style={{display:'flex', alignItems:'center', gap:12, flexWrap:'wrap'}}>
+              <div className="tabs">
+                {[['signals','📊 Signals'], ['history','🕐 History']].map(([key, label]) => (
+                  <button key={key} className={`tab-btn ${tab===key ? 'active' : ''}`} onClick={() => setTab(key)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {tab === 'signals' && (
+                <div className="search-box">
+                  <Search size={14} color="var(--text-3)"/>
+                  <input
+                    placeholder="Filter symbol or company…"
+                    value={query}
+                    onChange={e => setQuery(e.target.value)}
+                  />
+                  {query && <X size={13} color="var(--text-3)" style={{cursor:'pointer'}} onClick={() => setQuery('')}/>}
+                </div>
+              )}
             </div>
 
             {tab === 'signals' && (
               <>
-                <StocksTable stocks={results} filter="BUY"   title="BUY Signals"  colorClass="buy"   />
-                <StocksTable stocks={results} filter="WATCH" title="Watch List"    colorClass="watch" />
-                <StocksTable stocks={results} filter="SELL"  title="SELL Signals"  colorClass="sell"  />
+                <StocksTable stocks={results} filter="BUY"   title="BUY Signals"  colorClass="buy"   query={query} />
+                <StocksTable stocks={results} filter="WATCH" title="Watch List"    colorClass="watch" query={query} />
+                <StocksTable stocks={results} filter="SELL"  title="SELL Signals"  colorClass="sell"  query={query} />
+                {query && <StocksTable stocks={results} filter="HOLD" title="HOLD" colorClass="hold" query={query} />}
               </>
             )}
 
