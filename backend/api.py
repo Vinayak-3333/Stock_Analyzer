@@ -319,6 +319,21 @@ def events(limit: int = 100, stage: Optional[str] = None, symbol: Optional[str] 
     return JSONResponse(sanitize_floats(get_recent_events(limit=limit, stage=stage, symbol=symbol)))
 
 
+@app.get("/api/factor-ic")
+def factor_ic(days: int = 90):
+    """
+    Factor information-coefficient report: how well each scoring factor
+    (and the composite score) predicted realised 5/10/20-day forward
+    returns, plus per-signal hit rates. Backfills labels first.
+    """
+    try:
+        from core.backtest.labels import backfill_labels, compute_factor_ic
+        backfill_labels()
+        return JSONResponse(sanitize_floats(compute_factor_ic(days=days)))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/events/status")
 def events_status():
     """Event bus/lake health and per-stage counts."""

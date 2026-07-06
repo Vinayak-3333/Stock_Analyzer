@@ -745,6 +745,15 @@ def run_modular_analysis(limit: int | None = None) -> list[dict]:
             "Modular analysis complete: %d/%d stocks processed (source: %s)",
             len(results), len(symbols), source_label,
         )
+
+        # Close the feedback loop: fill forward-return labels for past runs
+        # now that today's bhavcopy closes are in the lake.
+        try:
+            from core.backtest.labels import backfill_labels
+            backfill_labels()
+        except Exception as exc:
+            log.warning("Label backfill failed: %s", exc)
+
         return results
     finally:
         close_lake()
