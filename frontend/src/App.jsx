@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback, useSyncExternalStore } from 'react'
 import axios from 'axios'
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, RadialBarChart, RadialBar, Cell
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  Cell, PieChart, Pie, AreaChart, Area,
+  RadarChart, PolarGrid, PolarAngleAxis, Radar,
 } from 'recharts'
 import {
-  TrendingUp, TrendingDown, Eye, Zap, RefreshCw, Clock,
-  X, ChevronUp, ChevronDown, AlertTriangle, Search, Trophy
+  TrendingUp, TrendingDown, Zap, RefreshCw, Clock,
+  X, ChevronUp, ChevronDown, AlertTriangle, Search,
 } from 'lucide-react'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
@@ -24,6 +25,19 @@ const getNewsScore = s => {
   return raw != null ? Number(raw) : null
 }
 const trendColor = v => v > 0 ? 'pos' : v < 0 ? 'neg' : 'neu'
+
+const FACTORS = [
+  ['fundamental',   'Fundamental'],
+  ['technical',     'Technical'],
+  ['institutional', 'Institutional'],
+  ['sentiment',     'Sentiment'],
+  ['sector',        'Sector'],
+  ['risk',          'Risk'],
+]
+const factorList = stock => FACTORS.map(([key, label]) => ({
+  key, label, value: Math.max(0, Math.min(100, Number(stock?.factor_scores?.[key] ?? 0))),
+}))
+const hasFactorData = stock => factorList(stock).some(f => f.value > 0)
 
 // ── useNow — wall-clock time, quantised to stepMs so renders stay stable ─────
 function useNow(stepMs = 30_000) {
@@ -55,18 +69,53 @@ function useCountUp(target, duration = 700) {
   return val
 }
 
-// ── SummaryCard ───────────────────────────────────────────────────────────────
-function SummaryCard({ type, icon, count, label, delay = 0 }) {
-  const n = useCountUp(count)
+// ── ScoreRing — SVG radial score indicator ────────────────────────────────────
+function ScoreRing({ score, size = 56 }) {
+  const stroke = 5
+  const r = (size - stroke * 2) / 2
+  const c = 2 * Math.PI * r
+  const color = scoreColor(score)
+  const val = Math.max(0, Math.min(100, Number(score) || 0))
   return (
-    <div className={`summary-card ${type} rise`} style={{ animationDelay: `${delay}s` }}>
-      <div className={`summary-icon ${type}`}>{icon}</div>
-      <div>
-        <div className={`summary-num ${type}`}>{n}</div>
-        <div className="summary-label">{label}</div>
-      </div>
+    <svg width={size} height={size} className="score-ring">
+      <circle cx={size/2} cy={size/2} r={r} stroke="rgba(255,255,255,0.08)" strokeWidth={stroke} fill="none" />
+      <circle
+        cx={size/2} cy={size/2} r={r}
+        stroke={color} strokeWidth={stroke} fill="none" strokeLinecap="round"
+        strokeDasharray={`${(val/100) * c} ${c}`}
+        transform={`rotate(-90 ${size/2} ${size/2})`}
+        style={{ filter: `drop-shadow(0 0 4px ${color})`, transition: 'stroke-dasharray 0.8s cubic-bezier(0.22,1,0.36,1)' }}
+      />
+      <text x="50%" y="50%" dominantBaseline="central" textAnchor="middle"
+        fill={color} fontSize={size/4} fontWeight="700" fontFamily="var(--mono)">
+        {Math.round(val)}
+      </text>
+    </svg>
+  )
+}
+
+// ── FactorBars — six vertical micro-bars, one per scoring dimension ──────────
+function FactorBars({ stock }) {
+  if (!hasFactorData(stock)) return null
+  return (
+    <div className="factor-bars">
+      {factorList(stock).map(f => (
+        <div className="factor-bar" key={f.key} title={`${f.label}: ${Math.round(f.value)}/100`}>
+          <div className="fb-track">
+            <div className="fb-fill" style={{ height: `${f.value}%`, background: scoreColor(f.value) }} />
+          </div>
+          <span>{f.label[0]}</span>
+        </div>
+      ))}
     </div>
   )
+}
+
+// ── NewsIcon ──────────────────────────────────────────────────────────────────
+function NewsIcon({ sentiment }) {
+  if (sentiment === 'POSITIVE') return <span title="Positive news" style={{color:'var(--green)'}}>📰✅</span>
+  if (sentiment === 'NEGATIVE') return <span title="Negative news" style={{color:'var(--red)'}}>📰⚠️</span>
+  return <span style={{color:'var(--text-3)'}}>—</span>
 }
 
 // ── ScoreBar ──────────────────────────────────────────────────────────────────
@@ -88,11 +137,151 @@ function ScoreBar({ score }) {
   )
 }
 
-// ── NewsIcon ──────────────────────────────────────────────────────────────────
-function NewsIcon({ sentiment }) {
-  if (sentiment === 'POSITIVE') return <span title="Positive news" style={{color:'var(--green)'}}>📰✅</span>
-  if (sentiment === 'NEGATIVE') return <span title="Negative news" style={{color:'var(--red)'}}>📰⚠️</span>
-  return <span style={{color:'var(--text-3)'}}>—</span>
+// ── RegimePanel — market regime, NIFTY, VIX, sector heat chips ───────────────
+function RegimePanel({ run }) {
+  const trend = run.market_trend || 'NEUTRAL'
+  const sectors = Object.entries(run.sector_changes || {})
+  const vixLevel = run.vix_value > 20 ? 'HIGH' : run.vix_value < 15 ? 'LOW' : 'MEDIUM'
+  return (
+    <div className="panel">
+      <div className="panel-eyebrow">Market Pulse</div>
+      <div className="regime-head">
+        <div className={`regime-badge ${trend.toLowerCase()}`}>
+          {trend === 'BULLISH' ? <TrendingUp size={18}/> : trend === 'BEARISH' ? <TrendingDown size={18}/> : <span style={{fontSize:15}}>≈</span>}
+          {trend}
+        </div>
+      </div>
+      <div className="regime-stats">
+        <div className="regime-stat">
+          <div className="rs-label">NIFTY 50 · 5d</div>
+          <div className={`rs-value ${trendColor(run.nifty_change)}`}>{fmtPct(run.nifty_change)}</div>
+        </div>
+        <div className="regime-stat">
+          <div className="rs-label">India VIX</div>
+          <div className={`rs-value ${run.vix_value > 20 ? 'neg' : run.vix_value < 15 ? 'pos' : 'neu'}`}>
+            {fmt(run.vix_value,1)} <span className="rs-sub">{vixLevel}</span>
+          </div>
+        </div>
+      </div>
+      {sectors.length > 0 && (
+        <div className="sector-heat">
+          {sectors.map(([name, chg]) => (
+            <span key={name} className={`heat-chip ${trendColor(chg)}`} title={`${name}: ${fmtPct(chg)} today`}>
+              {name} {fmtPct(chg)}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── SignalDonut — distribution of BUY / WATCH / HOLD / SELL ──────────────────
+function SignalDonut({ counts }) {
+  const total = counts.reduce((a, c) => a + c.value, 0)
+  const animated = useCountUp(total)
+  const data = counts.filter(c => c.value > 0)
+  return (
+    <div className="panel">
+      <div className="panel-eyebrow">Signal Mix</div>
+      <div className="donut-wrap">
+        <div className="donut-chart">
+          <ResponsiveContainer width="100%" height={150}>
+            <PieChart>
+              <Pie data={data} dataKey="value" nameKey="name"
+                innerRadius={48} outerRadius={66} paddingAngle={3}
+                strokeWidth={0} startAngle={90} endAngle={-270} isAnimationActive>
+                {data.map(c => <Cell key={c.name} fill={c.color} />)}
+              </Pie>
+              <Tooltip
+                contentStyle={{background:'#0d0d1a',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:12}}
+                itemStyle={{color:'var(--text-1)'}}
+                formatter={(v, name) => [`${v} stocks`, name]}
+              />
+            </PieChart>
+          </ResponsiveContainer>
+          <div className="donut-center">
+            <div className="donut-total">{animated}</div>
+            <div className="donut-sub">analysed</div>
+          </div>
+        </div>
+        <div className="donut-legend">
+          {counts.map(c => (
+            <div className="legend-row" key={c.name}>
+              <span className="legend-dot" style={{ background: c.color }} />
+              <span className="legend-name">{c.name}</span>
+              <span className="legend-val mono">{c.value}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── RunTrend — coverage & market across recent runs ──────────────────────────
+function RunTrend({ history }) {
+  const data = [...history].reverse().map(r => ({
+    t: new Date(r.run_time).toLocaleDateString('en-IN', { day:'2-digit', month:'short' }),
+    stocks: r.stock_count ?? 0,
+    nifty: r.nifty_change,
+    vix: r.vix_value,
+  }))
+  if (data.length < 2) return (
+    <div className="panel">
+      <div className="panel-eyebrow">Run Trend</div>
+      <div className="panel-placeholder">More runs needed to chart a trend</div>
+    </div>
+  )
+  return (
+    <div className="panel">
+      <div className="panel-eyebrow">Run Trend · stocks per run</div>
+      <ResponsiveContainer width="100%" height={150}>
+        <AreaChart data={data} margin={{ top: 10, right: 4, left: -26, bottom: 0 }}>
+          <defs>
+            <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="var(--green)" stopOpacity={0.35}/>
+              <stop offset="100%" stopColor="var(--green)" stopOpacity={0}/>
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false}/>
+          <XAxis dataKey="t" tick={{ fontSize: 9, fill: '#475569' }} tickLine={false} axisLine={false}/>
+          <YAxis tick={{ fontSize: 9, fill: '#475569' }} tickLine={false} axisLine={false}/>
+          <Tooltip
+            contentStyle={{background:'#0d0d1a',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:12}}
+            labelStyle={{color:'#94a3b8'}}
+            formatter={(v, name) => name === 'stocks' ? [`${v}`, 'stocks analysed'] : [v, name]}
+          />
+          <Area type="monotone" dataKey="stocks" stroke="var(--green)" strokeWidth={2}
+            fill="url(#trendFill)" dot={false} activeDot={{ r: 3 }}/>
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+// ── PickCard — designed card for a top-ranked stock ──────────────────────────
+function PickCard({ stock, rank, onSelect }) {
+  return (
+    <button className="pick-card rise" style={{ animationDelay: `${rank * 0.06}s` }} onClick={() => onSelect(stock)}>
+      <div className="pick-head">
+        <span className="pick-rank">#{rank}</span>
+        <span className={`signal-pill ${stock.signal}`}>{stock.signal}</span>
+      </div>
+      <div className="pick-symbol">{stock.symbol}</div>
+      <div className="pick-company" title={stock.company_name}>{stock.company_name || ' '}</div>
+      <div className="pick-body">
+        <div>
+          <div className="pick-price">{fmtPrice(stock.price)}</div>
+          <div className={`pick-change ${trendColor(stock.intraday_change)}`}>
+            {stock.intraday_change ? fmtPct(stock.intraday_change) : '—'} today
+          </div>
+        </div>
+        <ScoreRing score={stock.score} />
+      </div>
+      <FactorBars stock={stock} />
+    </button>
+  )
 }
 
 // ── StockModal ────────────────────────────────────────────────────────────────
@@ -109,6 +298,10 @@ function StockModal({ stock, onClose }) {
 
   if (!stock) return null
   const newsScore = getNewsScore(stock)
+  const factors = factorList(stock)
+  const showRadar = hasFactorData(stock)
+  const showRisk = stock.stop_loss != null || stock.target != null
+
   const technicals = [
     { k:'RSI (14)',      v: fmt(stock.rsi,1),    cls: stock.rsi < 30 ? 'pos' : stock.rsi > 70 ? 'neg' : '' },
     { k:'ADX',          v: fmt(stock.adx,0) },
@@ -123,6 +316,7 @@ function StockModal({ stock, onClose }) {
   ]
   const fundamentals = [
     { k:'P/E Ratio',       v: stock.pe_ratio != null ? fmt(stock.pe_ratio,1) : '—' },
+    { k:'Market Cap',      v: stock.market_cap_cr != null ? `₹${Number(stock.market_cap_cr).toLocaleString('en-IN',{maximumFractionDigits:0})} Cr` : '—' },
     { k:'Revenue Growth',  v: fmtPct(stock.revenue_growth) },
     { k:'EPS Growth',      v: fmtPct(stock.eps_growth) },
     { k:'Analyst Rating',  v: stock.analyst_rating != null
@@ -130,6 +324,7 @@ function StockModal({ stock, onClose }) {
         : '—',
       cls: stock.analyst_rating <= 2 ? 'pos' : stock.analyst_rating >= 4 ? 'neg' : ''
     },
+    { k:'Delivery %',      v: stock.delivery_pct ? `${fmt(stock.delivery_pct,1)}%` : '—' },
     { k:'52W High',        v: fmtPrice(stock.high_52w) },
     { k:'52W Low',         v: fmtPrice(stock.low_52w) },
     { k:'% from High',     v: fmtPct(-stock.pct_from_52w_high), cls:'neg' },
@@ -141,9 +336,10 @@ function StockModal({ stock, onClose }) {
       <div className="modal" onClick={e => e.stopPropagation()}>
         <button className="modal-close" onClick={onClose}><X size={14}/> Close</button>
 
-        <div style={{display:'flex', alignItems:'flex-start', justifyContent:'space-between'}}>
+        <div style={{display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:16}}>
           <div>
             <div className="modal-title">{stock.symbol}</div>
+            {stock.company_name && <div className="modal-company">{stock.company_name}{stock.industry && stock.industry !== 'Unknown' ? ` · ${stock.industry}` : ''}</div>}
             <div className="modal-price">{fmtPrice(stock.price)}</div>
             <div style={{marginTop:8, display:'flex', gap:8, flexWrap:'wrap', alignItems:'center'}}>
               <span className={`signal-pill ${stock.signal}`}>{stock.signal}</span>
@@ -152,28 +348,64 @@ function StockModal({ stock, onClose }) {
                   Today: {fmtPct(stock.intraday_change)}
                 </span>
               )}
-              {stock.open_gap !== 0 && (
-                <span style={{fontSize:12, color:'var(--text-2)'}}>Gap: {fmtPct(stock.open_gap)}</span>
-              )}
               <NewsIcon sentiment={stock.news_sentiment} />
               <span style={{fontSize:12, color:'var(--text-3)'}}>News score: {fmt(newsScore,0)}/100</span>
             </div>
           </div>
-
-          {/* Score Gauge */}
-          <div style={{textAlign:'center'}}>
-            <ResponsiveContainer width={100} height={80}>
-              <RadialBarChart cx="50%" cy="80%" innerRadius="60%" outerRadius="100%"
-                startAngle={180} endAngle={0} data={[{ value: stock.score }]}>
-                <RadialBar background dataKey="value" fill={scoreColor(stock.score)} cornerRadius={4} />
-              </RadialBarChart>
-            </ResponsiveContainer>
-            <div style={{fontSize:22, fontWeight:800, fontFamily:'var(--mono)', color:scoreColor(stock.score), marginTop:-8}}>{fmt(stock.score,0)}</div>
-            <div style={{fontSize:10, color:'var(--text-3)'}}>Score /100</div>
+          <div style={{textAlign:'center', flexShrink:0, paddingTop:6}}>
+            <ScoreRing score={stock.score} size={84} />
+            <div style={{fontSize:10, color:'var(--text-3)', marginTop:4}}>Score /100</div>
           </div>
         </div>
 
         <div className="modal-grid">
+          {/* Factor radar — the six scoring dimensions */}
+          {showRadar && (
+            <div className="modal-box">
+              <div className="modal-box-title">🎯 Factor Scores</div>
+              <ResponsiveContainer width="100%" height={200}>
+                <RadarChart data={factors} outerRadius={72}>
+                  <PolarGrid stroke="rgba(255,255,255,0.08)" />
+                  <PolarAngleAxis dataKey="label" tick={{ fontSize: 10, fill: '#94a3b8' }} />
+                  <Radar dataKey="value" stroke="var(--blue)" strokeWidth={2}
+                    fill="var(--blue)" fillOpacity={0.22} isAnimationActive />
+                  <Tooltip
+                    contentStyle={{background:'#0d0d1a',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:12}}
+                    formatter={v => [`${Math.round(v)}/100`]}
+                  />
+                </RadarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          {/* Risk plan from the risk engine */}
+          {showRisk && (
+            <div className="modal-box">
+              <div className="modal-box-title">🛡 Risk Plan</div>
+              {[
+                { k:'Entry (last price)', v: fmtPrice(stock.price) },
+                { k:'Stop Loss',  v: fmtPrice(stock.stop_loss),
+                  s: stock.stop_loss && stock.price ? fmtPct(((stock.stop_loss - stock.price)/stock.price)*100) : null, cls:'neg' },
+                { k:'Target',     v: fmtPrice(stock.target),
+                  s: stock.target && stock.price ? fmtPct(((stock.target - stock.price)/stock.price)*100) : null, cls:'pos' },
+                { k:'Risk : Reward',   v: stock.rr_ratio != null ? `1 : ${fmt(stock.rr_ratio,1)}` : '—' },
+                { k:'Position Size',   v: stock.position_size_pct != null ? `${fmt(stock.position_size_pct,1)}% of capital` : '—' },
+              ].map(({k,v,s,cls}) => (
+                <div className="kv-row" key={k}>
+                  <span className="kv-key">{k}</span>
+                  <span className={`kv-val ${cls||''}`}>{v}{s ? <span style={{opacity:0.65, marginLeft:6}}>({s})</span> : null}</span>
+                </div>
+              ))}
+              {stock.risk_flags?.length > 0 && (
+                <div className="risk-flags">
+                  {stock.risk_flags.map((f, i) => (
+                    <span className="risk-flag" key={i}><AlertTriangle size={10}/> {f}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Technicals */}
           <div className="modal-box">
             <div className="modal-box-title">📊 Technical Indicators</div>
@@ -202,6 +434,20 @@ function StockModal({ stock, onClose }) {
             )}
           </div>
 
+          {/* Why this score */}
+          {stock.top_reasons?.length > 0 && (
+            <div className="modal-box" style={{gridColumn:'1/-1'}}>
+              <div className="modal-box-title">💡 Why This Score</div>
+              <div className="reason-list">
+                {stock.top_reasons.map((r, i) => (
+                  <div className="reason-item" key={i}>
+                    <span className="reason-index">{i+1}</span>{r}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* News */}
           {stock.top_news && stock.top_news.length > 0 && (
             <div className="modal-box" style={{gridColumn:'1/-1'}}>
@@ -220,10 +466,9 @@ function StockModal({ stock, onClose }) {
 }
 
 // ── StocksTable ───────────────────────────────────────────────────────────────
-function StocksTable({ stocks, filter, title, colorClass, query }) {
+function StocksTable({ stocks, filter, title, colorClass, query, onSelect }) {
   const [sortKey, setSortKey] = useState('score')
   const [sortDir, setSortDir] = useState(-1)
-  const [selected, setSelected] = useState(null)
 
   const q = (query || '').trim().toUpperCase()
   const enriched = stocks.map(s => ({ ...s, news_score: getNewsScore(s) }))
@@ -246,60 +491,59 @@ function StocksTable({ stocks, filter, title, colorClass, query }) {
   if (!sorted.length) return null
 
   return (
-    <>
-      {selected && <StockModal stock={selected} onClose={() => setSelected(null)} />}
-      <div className="rise">
-        <div className="section-header">
-          <div className="section-title">
-            {colorClass === 'buy' ? '🟢' : colorClass === 'sell' ? '🔴' : colorClass === 'hold' ? '⚪' : '🔵'} {title}
-            <span>{sorted.length} stocks</span>
-          </div>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                {col('symbol','Symbol', 'Stock ticker symbol on NSE')}
-                {col('price','Price', 'Latest traded price in INR')}
-                {col('score','Score', 'Multi-Factor Score (0-100)')}
-                {col('rsi','RSI', 'Relative Strength Index (Momentum indicator)')}
-                {col('adx','ADX', 'Average Directional Index (Trend strength > 25 is strong)')}
-                {col('atr_pct','ATR', 'Average True Range % (Daily volatility measure)')}
-                {col('intraday_change','Today', 'Intraday price change %')}
-                {col('news_score','News', 'Sentiment sub-score from recent news (0-100)')}
-                {col('revenue_growth','Rev Gr.', '1-Year Revenue Growth % (Fundamental metric)')}
-                {col('volume_ratio','Vol', 'Volume relative to 20-day average (e.g., 2.0x)')}
-                <th title="Final recommendation signal">Signal</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map(s => (
-                <tr key={s.symbol}>
-                  <td className="symbol-cell" onClick={() => setSelected(s)}>{s.symbol}</td>
-                  <td className="mono">{fmtPrice(s.price)}</td>
-                  <td><ScoreBar score={s.score} /></td>
-                  <td className={`mono ${s.rsi < 30 ? 'pos' : s.rsi > 70 ? 'neg' : ''}`}>{fmt(s.rsi,1)}</td>
-                  <td className="mono">{fmt(s.adx,0)}</td>
-                  <td className="mono">{fmt(s.atr_pct)}%</td>
-                  <td className={`mono ${s.intraday_change > 0 ? 'pos' : s.intraday_change < 0 ? 'neg' : ''}`}>
-                    {s.intraday_change ? fmtPct(s.intraday_change) : '—'}
-                  </td>
-                  <td>
-                    <span style={{fontFamily:'var(--mono)', fontSize:12, color: s.news_score != null ? newsScoreColor(s.news_score) : 'var(--text-3)'}}>
-                      {s.news_score != null ? fmt(s.news_score,0) : '—'}
-                    </span>
-                    <NewsIcon sentiment={s.news_sentiment} />
-                  </td>
-                  <td className={`mono ${trendColor(s.revenue_growth)}`}>{fmtPct(s.revenue_growth)}</td>
-                  <td className="mono">{fmt(s.volume_ratio,1)}x</td>
-                  <td><span className={`signal-pill ${s.signal}`}>{s.signal}</span></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+    <div className="rise">
+      <div className="section-header">
+        <div className="section-title">
+          {colorClass === 'buy' ? '🟢' : colorClass === 'sell' ? '🔴' : colorClass === 'hold' ? '⚪' : '🔵'} {title}
+          <span>{sorted.length} stocks</span>
         </div>
       </div>
-    </>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              {col('symbol','Symbol', 'Stock ticker symbol on NSE')}
+              {col('price','Price', 'Latest traded price in INR')}
+              {col('score','Score', 'Multi-Factor Score (0-100)')}
+              {col('rsi','RSI', 'Relative Strength Index (Momentum indicator)')}
+              {col('adx','ADX', 'Average Directional Index (Trend strength > 25 is strong)')}
+              {col('atr_pct','ATR', 'Average True Range % (Daily volatility measure)')}
+              {col('intraday_change','Today', 'Intraday price change %')}
+              {col('news_score','News', 'Sentiment sub-score from recent news (0-100)')}
+              {col('revenue_growth','Rev Gr.', '1-Year Revenue Growth % (Fundamental metric)')}
+              {col('target','Target', 'Risk-engine price target')}
+              {col('stop_loss','Stop', 'ATR-based stop loss')}
+              <th title="Final recommendation signal">Signal</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map(s => (
+              <tr key={s.symbol}>
+                <td className="symbol-cell" onClick={() => onSelect(s)}>{s.symbol}</td>
+                <td className="mono">{fmtPrice(s.price)}</td>
+                <td><ScoreBar score={s.score} /></td>
+                <td className={`mono ${s.rsi < 30 ? 'pos' : s.rsi > 70 ? 'neg' : ''}`}>{fmt(s.rsi,1)}</td>
+                <td className="mono">{fmt(s.adx,0)}</td>
+                <td className="mono">{fmt(s.atr_pct)}%</td>
+                <td className={`mono ${s.intraday_change > 0 ? 'pos' : s.intraday_change < 0 ? 'neg' : ''}`}>
+                  {s.intraday_change ? fmtPct(s.intraday_change) : '—'}
+                </td>
+                <td>
+                  <span style={{fontFamily:'var(--mono)', fontSize:12, color: s.news_score != null ? newsScoreColor(s.news_score) : 'var(--text-3)'}}>
+                    {s.news_score != null ? fmt(s.news_score,0) : '—'}
+                  </span>
+                  <NewsIcon sentiment={s.news_sentiment} />
+                </td>
+                <td className={`mono ${trendColor(s.revenue_growth)}`}>{fmtPct(s.revenue_growth)}</td>
+                <td className="mono pos">{s.target != null ? fmtPrice(s.target) : '—'}</td>
+                <td className="mono neg">{s.stop_loss != null ? fmtPrice(s.stop_loss) : '—'}</td>
+                <td><span className={`signal-pill ${s.signal}`}>{s.signal}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   )
 }
 
@@ -309,7 +553,7 @@ function HistoryPanel({ history }) {
     <div className="empty"><div className="empty-icon">📋</div><div className="empty-msg">No history yet</div></div>
   )
   return (
-    <div>
+    <div className="rise">
       <div className="section-header">
         <div className="section-title">🕐 Run History <span>{history.length} runs</span></div>
       </div>
@@ -346,55 +590,26 @@ function HistoryPanel({ history }) {
   )
 }
 
-// ── MarketBar ─────────────────────────────────────────────────────────────────
-function MarketBar({ run }) {
-  if (!run) return null
-  const sc = run.sector_changes || {}
-  return (
-    <div className="market-bar rise">
-      <div className="market-tile">
-        <div className="market-tile-label">NIFTY 50</div>
-        <div className={`market-tile-value ${trendColor(run.nifty_change)}`}>{fmtPct(run.nifty_change)}</div>
-        <div className="market-tile-sub">5-day change</div>
-      </div>
-      <div className="market-tile">
-        <div className="market-tile-label">India VIX</div>
-        <div className={`market-tile-value ${run.vix_value > 20 ? 'neg' : run.vix_value < 15 ? 'pos' : 'neu'}`}>
-          {fmt(run.vix_value,1)}
-        </div>
-        <div className="market-tile-sub">{run.vix_value > 20 ? 'HIGH' : run.vix_value < 15 ? 'LOW' : 'MEDIUM'} volatility</div>
-      </div>
-      {Object.entries(sc).map(([name, chg]) => (
-        <div className="market-tile" key={name}>
-          <div className="market-tile-label">{name}</div>
-          <div className={`market-tile-value ${trendColor(chg)}`}>{fmtPct(chg)}</div>
-          <div className="market-tile-sub">Today</div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
 // ── ScoreDistChart ────────────────────────────────────────────────────────────
 function ScoreDistChart({ results }) {
   if (!results.length) return null
   const bins = Array.from({length:10}, (_,i) => ({ range:`${i*10}-${i*10+10}`, count:0 }))
   results.forEach(r => { const i = Math.min(Math.floor(r.score/10), 9); bins[i].count++ })
   return (
-    <div className="modal-box" style={{padding:'16px 16px 8px'}}>
-      <div className="modal-box-title">Score Distribution</div>
+    <div className="panel" style={{padding:'16px 16px 8px'}}>
+      <div className="panel-eyebrow">Score Distribution</div>
       <ResponsiveContainer width="100%" height={120}>
-        <BarChart data={bins} margin={{top:0,right:0,left:-20,bottom:0}}>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-          <XAxis dataKey="range" tick={{fontSize:9, fill:'#475569'}} />
-          <YAxis tick={{fontSize:9, fill:'#475569'}} />
+        <BarChart data={bins} margin={{top:6,right:0,left:-20,bottom:0}}>
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" vertical={false}/>
+          <XAxis dataKey="range" tick={{fontSize:9, fill:'#475569'}} tickLine={false} axisLine={false}/>
+          <YAxis tick={{fontSize:9, fill:'#475569'}} tickLine={false} axisLine={false}/>
           <Tooltip
             contentStyle={{background:'#0d0d1a',border:'1px solid rgba(255,255,255,0.08)',borderRadius:8,fontSize:12}}
             labelStyle={{color:'#94a3b8'}}
           />
           <Bar dataKey="count" radius={[3,3,0,0]}>
             {bins.map((entry, idx) => (
-              <Cell key={idx} fill={idx >= 7 ? 'var(--green)' : idx >= 5 ? 'var(--blue)' : 'var(--text-3)'} />
+              <Cell key={idx} fill={idx >= 7 ? 'var(--green)' : idx >= 5 ? 'var(--blue)' : 'rgba(148,163,184,0.35)'} />
             ))}
           </Bar>
         </BarChart>
@@ -414,6 +629,7 @@ export default function App() {
   const [pollTimer,  setPollTimer]  = useState(null)
   const [tab, setTab] = useState('signals')   // 'signals' | 'history'
   const [query, setQuery] = useState('')
+  const [selected, setSelected] = useState(null)
   const now = useNow()   // refreshes every 30s for the countdown chip
 
   const fetchAll = useCallback(async () => {
@@ -486,14 +702,20 @@ export default function App() {
   const buys    = results.filter(r => r.signal === 'BUY')
   const sells   = results.filter(r => r.signal === 'SELL')
   const watches = results.filter(r => r.signal === 'WATCH')
+  const holds   = results.filter(r => r.signal === 'HOLD')
 
   const isRunning = status?.analysis_running || triggering
   const mktTrend  = run?.market_trend || 'NEUTRAL'
   const lastTime  = run?.run_time ? new Date(run.run_time).toLocaleString('en-IN') : null
 
-  const topPick = results.length
-    ? results.reduce((a, b) => (b.score > a.score ? b : a), results[0])
-    : null
+  const topPicks = [...results].sort((a, b) => b.score - a.score).slice(0, 5)
+
+  const signalCounts = [
+    { name: 'BUY',   value: buys.length,    color: 'var(--green)' },
+    { name: 'WATCH', value: watches.length, color: 'var(--blue)' },
+    { name: 'HOLD',  value: holds.length,   color: 'rgba(148,163,184,0.45)' },
+    { name: 'SELL',  value: sells.length,   color: 'var(--red)' },
+  ]
 
   const nextRunAt = (status?.scheduled_jobs || [])
     .map(j => new Date(j.next_run).getTime())
@@ -506,6 +728,8 @@ export default function App() {
 
   return (
     <div className="app">
+      {selected && <StockModal stock={selected} onClose={() => setSelected(null)} />}
+
       {/* Backend offline warning */}
       {backendOff && (
         <div style={{
@@ -551,13 +775,17 @@ export default function App() {
       <main className="main">
         {loading && (
           <>
-            <div className="summary-row">
-              {[0, 1, 2, 3].map(i => (
-                <div key={i} className="skeleton" style={{ height: 94, animationDelay: `${i * 0.1}s` }} />
+            <div className="hero">
+              {[0, 1, 2].map(i => (
+                <div key={i} className="skeleton" style={{ height: 210, animationDelay: `${i * 0.1}s` }} />
               ))}
             </div>
-            <div className="skeleton" style={{ height: 110 }} />
-            <div className="skeleton" style={{ height: 340 }} />
+            <div style={{ display:'flex', gap:14, overflow:'hidden' }}>
+              {[0, 1, 2, 3, 4].map(i => (
+                <div key={i} className="skeleton" style={{ height: 190, minWidth: 190, flex: 1, animationDelay: `${i * 0.08}s` }} />
+              ))}
+            </div>
+            <div className="skeleton" style={{ height: 320 }} />
           </>
         )}
 
@@ -574,44 +802,42 @@ export default function App() {
             <div className="empty-icon" style={{animation:'spin 2s linear infinite',display:'inline-block'}}>⚙️</div>
             <div className="empty-msg">Analysis running…</div>
             <div className="empty-sub">
-              Downloading market data and computing signals for all stocks.<br/>
-              This takes <strong>3–8 minutes</strong> — the dashboard will update automatically when done.
+              Screening the market and computing signals.<br/>
+              The dashboard will update automatically when done.
             </div>
           </div>
         )}
 
         {!loading && run && (
           <>
-            {/* Market Bar */}
-            <MarketBar run={run} />
-
-            {/* Summary Cards */}
-            <div className="summary-row">
-              <SummaryCard type="buy"   icon={<TrendingUp size={24} color="var(--green)"/>}  count={buys.length}    label="BUY Signals" />
-              <SummaryCard type="watch" icon={<Eye size={24} color="var(--blue)"/>}          count={watches.length} label="WATCH List"  delay={0.06} />
-              <SummaryCard type="sell"  icon={<TrendingDown size={24} color="var(--red)"/>}  count={sells.length}   label="SELL Signals" delay={0.12} />
-              {topPick && (
-                <div className="summary-card pick rise" style={{ animationDelay: '0.18s' }}>
-                  <div className="summary-icon pick"><Trophy size={24} color="var(--purple)"/></div>
-                  <div>
-                    <div className="summary-num pick" style={{ fontSize: 24 }}>{topPick.symbol}</div>
-                    <div className="summary-label">
-                      Top Pick · Score {fmt(topPick.score, 0)} · <span className={`signal-pill ${topPick.signal}`} style={{ fontSize: 10, padding: '1px 8px' }}>{topPick.signal}</span>
-                    </div>
-                  </div>
-                </div>
-              )}
+            {/* Hero: market pulse + signal mix + run trend */}
+            <div className="hero rise">
+              <RegimePanel run={run} />
+              <SignalDonut counts={signalCounts} />
+              <RunTrend history={history} />
             </div>
 
-            {/* Score dist chart + quick stats */}
+            {/* Top picks strip */}
+            {topPicks.length > 0 && (
+              <div>
+                <div className="section-header">
+                  <div className="section-title">🏆 Top Picks <span>highest conviction this run</span></div>
+                </div>
+                <div className="picks-row">
+                  {topPicks.map((s, i) => (
+                    <PickCard key={s.symbol} stock={s} rank={i + 1} onSelect={setSelected} />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Analytics row */}
             <div className="rise" style={{display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(300px, 1fr))', gap:16, animationDelay:'0.1s'}}>
               <ScoreDistChart results={results} />
-              <div className="modal-box" style={{padding:'16px 18px'}}>
-                <div className="modal-box-title">Analysis Summary</div>
+              <div className="panel" style={{padding:'16px 18px'}}>
+                <div className="panel-eyebrow">Analysis Summary</div>
                 {[
                   {k:'Stocks Analysed', v: results.length},
-                  {k:'India VIX',       v: run.vix_value != null ? fmt(run.vix_value,1) : '—'},
-                  {k:'NIFTY 5-day',     v: fmtPct(run.nifty_change), cls: trendColor(run.nifty_change)},
                   {k:'Avg Score',       v: fmt(results.reduce((a,b)=>a+b.score,0)/(results.length||1),1)},
                   {k:'Positive News',   v: results.filter(r=>r.news_sentiment==='POSITIVE').length + ' stocks'},
                   {k:'Negative News',   v: results.filter(r=>r.news_sentiment==='NEGATIVE').length + ' stocks'},
@@ -650,10 +876,10 @@ export default function App() {
 
             {tab === 'signals' && (
               <>
-                <StocksTable stocks={results} filter="BUY"   title="BUY Signals"  colorClass="buy"   query={query} />
-                <StocksTable stocks={results} filter="WATCH" title="Watch List"    colorClass="watch" query={query} />
-                <StocksTable stocks={results} filter="SELL"  title="SELL Signals"  colorClass="sell"  query={query} />
-                {query && <StocksTable stocks={results} filter="HOLD" title="HOLD" colorClass="hold" query={query} />}
+                <StocksTable stocks={results} filter="BUY"   title="BUY Signals"  colorClass="buy"   query={query} onSelect={setSelected} />
+                <StocksTable stocks={results} filter="WATCH" title="Watch List"    colorClass="watch" query={query} onSelect={setSelected} />
+                <StocksTable stocks={results} filter="SELL"  title="SELL Signals"  colorClass="sell"  query={query} onSelect={setSelected} />
+                {query && <StocksTable stocks={results} filter="HOLD" title="HOLD" colorClass="hold" query={query} onSelect={setSelected} />}
               </>
             )}
 
