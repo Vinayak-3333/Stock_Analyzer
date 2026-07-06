@@ -17,6 +17,7 @@ build/
 # committed template)
 .env.local
 .env.nas
+.env.nas.example
 
 # ── Database (generated at runtime) ──────────────────────────────────────────
 backend/data/
