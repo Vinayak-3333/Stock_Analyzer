@@ -1,4 +1,4 @@
-# 📡 StockRadar IN — AI-Powered Indian Stock Analyzer
+# 📡 StockRadar IN — Multi-Factor Indian Stock Analyzer
 
 > A production-grade, fully automated Indian stock market intelligence system with a live React dashboard deployed on Vercel.
 
