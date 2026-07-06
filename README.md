@@ -142,8 +142,7 @@ Stock_Analyzer/
 │   ├── src/
 │   │   ├── App.jsx              ← Main dashboard + tables + modals
 │   │   └── index.css            ← Dark theme design system
-│   ├── vercel.json              ← Vercel deployment config
-│   └── .env.example             ← Environment variable reference
+│   └── vercel.json              ← Vercel deployment config
 │
 ├── docker-compose.yml           ← Kafka + Zookeeper + Redis (optional streaming)
 ├── requirements.txt             ← All Python dependencies
@@ -201,13 +200,23 @@ pip install -r requirements.txt
 ```
 
 ### 2. Configure credentials
-Create a `.env` file in the project root (use `.env.nas.example` as the template):
+Create a `.env` file in the project root:
 ```bash
 GMAIL_SENDER=your@gmail.com
 GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx   # 16-char Gmail App Password
 RECIPIENT_EMAIL=your@gmail.com
-# Optional: market-data API keys, provider order, Telegram, tuning knobs —
-# see .env.nas.example for the full list
+
+# Optional — market-data providers and tuning knobs
+MARKET_DATA_PROVIDER_ORDER=twelve_data,alpha_vantage,fmp,finnhub,groww
+ALPHA_VANTAGE_API_KEY=
+FINNHUB_API_KEY=
+TWELVE_DATA_API_KEY=
+FMP_API_KEY=
+NEWSAPI_KEY=
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+DEEP_ANALYSIS_COUNT=400
+FUNDAMENTALS_CACHE_TTL_DAYS=7
 ```
 > ⚠️ Never hardcode credentials in source files and never commit `.env` — it's gitignored for a reason.
 
