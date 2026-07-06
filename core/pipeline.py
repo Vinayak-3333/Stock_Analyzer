@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import random
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -154,7 +155,8 @@ def _screen_universe(
 def _fallback_quotes_from_yfinance(symbols: list[str]) -> dict[str, dict]:
     """
     Build rich quote payloads from Yahoo Finance when NSE is blocked.
-    - Bulk-downloads last 5 days of OHLCV for all symbols in one call
+    - Bulk-downloads last 5 days of OHLCV in chunked batches (Yahoo
+      silently drops most tickers when a single call asks for too many)
     - Enriches with yearHigh/yearLow from fast_info in parallel
     Works both during market hours (live price) and after-hours (last close).
     """
@@ -162,62 +164,79 @@ def _fallback_quotes_from_yfinance(symbols: list[str]) -> dict[str, dict]:
     sym_to_yfsym = dict(zip(symbols, yf_symbols))
     quotes: dict[str, dict] = {}
 
-    # ── Step 1: Bulk OHLCV download (single network call) ─────────────────────
-    try:
-        df = yf.download(
-            yf_symbols,
-            period="5d",
-            interval="1d",
-            progress=False,
-            auto_adjust=True,
-            threads=True,
-        )
-    except Exception as exc:
-        log.warning("Yahoo bulk OHLCV download failed: %s", exc)
-        df = None
-
-    if df is not None and not df.empty:
-        for raw_sym, yf_sym in sym_to_yfsym.items():
+    # ── Step 1: Bulk OHLCV download (chunked — Yahoo throttles huge batches) ──
+    # Second pass retries symbols dropped by a transient 429 window.
+    for attempt in range(2):
+        targets = [s for s in symbols if s not in quotes]
+        if not targets:
+            break
+        if attempt:
+            if len(targets) <= max(20, len(symbols) // 20):
+                break  # small residue is delisted/missing tickers, not throttling
+            log.warning(
+                "Yahoo dropped %d/%d symbols — retrying once after cooldown",
+                len(targets), len(symbols),
+            )
+            time.sleep(30)
+        for start in range(0, len(targets), TIER1_CHUNK_SIZE):
+            chunk = targets[start:start + TIER1_CHUNK_SIZE]
             try:
-                if isinstance(df.columns, pd.MultiIndex):
-                    if yf_sym not in df.columns.get_level_values(-1):
-                        continue
-                    sym_df = df.xs(yf_sym, axis=1, level=-1).dropna(how="all")
-                else:
-                    sym_df = df.dropna(how="all")
-
-                if sym_df.empty or "Close" not in sym_df:
-                    continue
-
-                last = sym_df.iloc[-1]
-                prev = sym_df.iloc[-2] if len(sym_df) > 1 else last
-                last_price = _clean_number(last.get("Close"))
-                prev_close = _clean_number(prev.get("Close"), last_price)
-                if last_price is None:
-                    continue
-
-                p_change = 0.0
-                if prev_close and prev_close > 0:
-                    p_change = ((last_price - prev_close) / prev_close) * 100
-
-                quotes[raw_sym] = {
-                    "symbol":             raw_sym,
-                    "lastPrice":          last_price,
-                    "open":               _clean_number(last.get("Open"), last_price),
-                    "dayHigh":            _clean_number(last.get("High"), last_price),
-                    "dayLow":             _clean_number(last.get("Low"), last_price),
-                    "previousClose":      prev_close,
-                    "pChange":            round(p_change, 2),
-                    "totalTradedVolume":  _clean_number(last.get("Volume")),
-                    "yearHigh":           None,  # enriched below
-                    "yearLow":            None,  # enriched below
-                    "companyName":        raw_sym,
-                    "industry":           "",
-                    "index":              "YFINANCE",
-                    "fetched_at":         datetime.now().isoformat(),
-                }
+                df = yf.download(
+                    [sym_to_yfsym[s] for s in chunk],
+                    period="5d",
+                    interval="1d",
+                    progress=False,
+                    auto_adjust=True,
+                    threads=True,
+                )
             except Exception as exc:
-                log.debug("Yahoo OHLCV parse failed for %s: %s", raw_sym, exc)
+                log.warning("Yahoo OHLCV chunk %d–%d failed: %s", start, start + len(chunk), exc)
+                continue
+            if df is None or df.empty:
+                continue
+
+            for raw_sym in chunk:
+                yf_sym = sym_to_yfsym[raw_sym]
+                try:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        if yf_sym not in df.columns.get_level_values(-1):
+                            continue
+                        sym_df = df.xs(yf_sym, axis=1, level=-1).dropna(how="all")
+                    else:
+                        sym_df = df.dropna(how="all")
+
+                    if sym_df.empty or "Close" not in sym_df:
+                        continue
+
+                    last = sym_df.iloc[-1]
+                    prev = sym_df.iloc[-2] if len(sym_df) > 1 else last
+                    last_price = _clean_number(last.get("Close"))
+                    prev_close = _clean_number(prev.get("Close"), last_price)
+                    if last_price is None:
+                        continue
+
+                    p_change = 0.0
+                    if prev_close and prev_close > 0:
+                        p_change = ((last_price - prev_close) / prev_close) * 100
+
+                    quotes[raw_sym] = {
+                        "symbol":             raw_sym,
+                        "lastPrice":          last_price,
+                        "open":               _clean_number(last.get("Open"), last_price),
+                        "dayHigh":            _clean_number(last.get("High"), last_price),
+                        "dayLow":             _clean_number(last.get("Low"), last_price),
+                        "previousClose":      prev_close,
+                        "pChange":            round(p_change, 2),
+                        "totalTradedVolume":  _clean_number(last.get("Volume")),
+                        "yearHigh":           None,  # filled from t_high_52w at result time
+                        "yearLow":            None,
+                        "companyName":        raw_sym,
+                        "industry":           "",
+                        "index":              "YFINANCE",
+                        "fetched_at":         datetime.now().isoformat(),
+                    }
+                except Exception as exc:
+                    log.debug("Yahoo OHLCV parse failed for %s: %s", raw_sym, exc)
 
     log.info("Yahoo bulk OHLCV: %d/%d symbols", len(quotes), len(symbols))
 
@@ -264,9 +283,14 @@ def _fallback_quotes_from_yfinance(symbols: list[str]) -> dict[str, dict]:
         except Exception as exc:
             log.debug("fast_info enrich failed for %s: %s", raw_sym, exc)
 
-    enrich_targets = list(quotes.keys()) or list(sym_to_yfsym.keys())
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(enrich_targets))) as ex:
-        list(ex.map(_enrich_one, enrich_targets))
+    # Only symbols the bulk download missed get a per-symbol fast_info call.
+    # For everything else the 52-week range comes from Tier-1 history
+    # (t_high_52w) at result time — mass enrichment would only burn the
+    # rate-limit budget that the quote/history downloads need.
+    enrich_targets = [s for s in symbols if s not in quotes]
+    if enrich_targets:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(enrich_targets))) as ex:
+            list(ex.map(_enrich_one, enrich_targets))
 
     log.info("Yahoo quotes ready: %d/%d symbols (with 52w data)", len(quotes), len(symbols))
     return quotes
@@ -558,8 +582,21 @@ def _resolve_symbols_and_quotes(session) -> tuple[dict[str, dict], str]:
     # Even if NSE live worked, we want MORE symbols to reach ~2000
     additional_symbols: list[str] = []
 
-    # 2a: Try bhavcopy (gives ~1,800 EQ symbols)
+    # Equity master list (EQUITY_L.csv) — real companies only. The bhavcopy
+    # EQ series also contains ETFs/liquid funds, which score deceptively well
+    # on technicals, so bhavcopy symbols are filtered against this set.
+    csv_symbols = _fetch_broad_nse_symbols()
+    equity_master = set(csv_symbols)
+
+    # 2a: Try bhavcopy (~1,800 genuine equities after the master filter)
     bhav_symbols = fetch_equity_symbols_from_bhavcopy()
+    if bhav_symbols and equity_master:
+        raw_count = len(bhav_symbols)
+        bhav_symbols = [s for s in bhav_symbols if s in equity_master]
+        log.info("Step 2a: Bhavcopy — %d EQ symbols, %d after ETF/fund filter",
+                 raw_count, len(bhav_symbols))
+    elif bhav_symbols:
+        log.warning("Equity master unavailable — bhavcopy unfiltered (may include ETFs)")
     if bhav_symbols:
         # Only keep symbols not already in NSE live quotes
         new_from_bhav = [s for s in bhav_symbols if s not in quotes]
@@ -567,15 +604,13 @@ def _resolve_symbols_and_quotes(session) -> tuple[dict[str, dict], str]:
         log.info("Step 2a: Bhavcopy — %d new symbols (already have %d)",
                  len(new_from_bhav), len(quotes))
 
-    # 2b: Try NSE equity listing CSV (gives ~2,200 symbols)
-    if len(quotes) + len(additional_symbols) < MAX_SYMBOL_COUNT:
-        csv_symbols = _fetch_broad_nse_symbols()
-        if csv_symbols:
-            existing = set(quotes.keys()) | set(additional_symbols)
-            new_from_csv = [s for s in csv_symbols if s not in existing]
-            additional_symbols.extend(new_from_csv)
-            log.info("Step 2b: NSE equity CSV — %d new symbols",
-                     len(new_from_csv))
+    # 2b: Anything in the equity master that bhavcopy missed
+    if len(quotes) + len(additional_symbols) < MAX_SYMBOL_COUNT and csv_symbols:
+        existing = set(quotes.keys()) | set(additional_symbols)
+        new_from_csv = [s for s in csv_symbols if s not in existing]
+        additional_symbols.extend(new_from_csv)
+        log.info("Step 2b: NSE equity CSV — %d new symbols",
+                 len(new_from_csv))
 
     # Cap the additional symbols so total doesn't exceed MAX_SYMBOL_COUNT.
     # Shuffle before capping so coverage rotates across runs instead of
