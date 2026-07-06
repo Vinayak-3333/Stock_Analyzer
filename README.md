@@ -11,8 +11,10 @@
 
 ## ✨ What It Does
 
-StockRadar IN scans **120–165 NSE stocks** across 6 indices every market day, scores them using a **multi-factor AI engine**, and delivers:
+StockRadar IN scans up to **~2,000 NSE equities** every market day using a **two-tier funnel** — a cheap technical screen over the full universe, then a deep multi-factor dive on the strongest candidates — and delivers:
 
+- 🔭 **Dynamic universe** — resolved fresh each run from 26 NSE indices + bhavcopy + the NSE equity master list (no hardcoded stock lists, ETFs/liquid funds filtered out)
+- ⚡ **Two-tier analysis** — Tier 1 screens all ~2,000 with technicals only; Tier 2 runs the full fundamental/news/institutional engine on the top 400
 - 📧 **Email alerts** at 09:15 AM & 15:30 IST (market open + close)
 - 🌐 **Live React dashboard** with sortable tables, score breakdowns, detail modals
 - 📊 **8-layer architecture** — from raw data collection to risk-adjusted recommendations
@@ -24,19 +26,33 @@ StockRadar IN scans **120–165 NSE stocks** across 6 indices every market day, 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                  Data Sources Layer                      │
-│  NSE India API · Yahoo Finance · Screener.in · GDELT     │
-│  Google News RSS · Economic Times RSS · NewsAPI          │
+│  NSE India API · Yahoo Finance · Groww · Screener.in     │
+│  GDELT · Google News RSS · Economic Times RSS · NewsAPI  │
 └──────────────────────┬──────────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────────┐
 │               Collectors (core/collectors/)              │
-│  nse.py · global_data.py · fundamentals.py · news.py    │
+│  nse.py · market_data.py · global_data.py               │
+│  fundamentals.py · news.py                               │
 └──────────────────────┬──────────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────────┐
 │               Data Lake (DuckDB)                         │
 │  raw_ohlcv · raw_delivery · raw_fii_dii · raw_news       │
-│  raw_macro · raw_fundamentals · raw_options_summary      │
+│  raw_macro · raw_options_summary · known_symbols         │
+│  fundamentals_cache (7-day TTL)                          │
+└──────────────────────┬──────────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────────┐
+│      Symbol Universe Resolution (core/pipeline.py)       │
+│  NSE live (26 indices) + bhavcopy ∩ equity master        │
+│  + DuckDB symbol cache → ~2,000 equities, zero ETFs      │
+└──────────────────────┬──────────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────────┐
+│                 Two-Tier Analysis Funnel                 │
+│  Tier 1: technical screen of all ~2,000 (bulk OHLCV)     │
+│  Tier 2: top 400 → fundamentals · news · delivery        │
 └──────────────────────┬──────────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────────┐
@@ -63,6 +79,31 @@ StockRadar IN scans **120–165 NSE stocks** across 6 indices every market day, 
 
 ---
 
+## 🔭 How a Run Works — Dynamic Universe + Two-Tier Funnel
+
+**1. Symbol resolution (no hardcoded lists).** Each run builds the universe fresh:
+- **NSE live quotes** from 26 indices (~350 stocks with the richest data)
+- **Supplemented** by the day's bhavcopy, filtered against the NSE equity master list (`EQUITY_L.csv`) so ETFs and liquid funds never enter the universe
+- **DuckDB `known_symbols` cache** as a last-resort fallback if every live source fails
+- Capped at ~2,000; when over cap, the supplement is shuffled so coverage rotates across runs instead of always dropping the same stocks
+
+**2. Tier 1 — broad screen.** All ~2,000 equities get 1 year of daily OHLCV via chunked bulk downloads (throttle-resilient: chunked batches → cooldown retry → per-symbol fallback) and a **technical-only score**. No per-symbol fundamentals/news calls — screening the whole market costs almost nothing.
+
+**3. Tier 2 — deep dive.** The top **`DEEP_ANALYSIS_COUNT`** (default 400) by technical score get the full engine: fundamentals, news sentiment, institutional flows, delivery data — reusing the history Tier 1 already downloaded.
+
+**4. Aggressive caching keeps it fast (~10× fewer HTTP calls):**
+
+| Cache | Backing | Refresh |
+|---|---|---|
+| Fundamentals | DuckDB `fundamentals_cache` | 7 days (staggered per symbol) |
+| Delivery % | DuckDB `raw_delivery`, fed by the daily bhavcopy | Daily, zero per-symbol NSE calls |
+| Market-wide news (ET RSS) | In-process | Once per run |
+| Symbol universe | DuckDB `known_symbols` | Every successful run |
+
+Tune with env vars: `DEEP_ANALYSIS_COUNT` (Tier-2 size) and `FUNDAMENTALS_CACHE_TTL_DAYS`.
+
+---
+
 ## 📁 Project Structure
 
 ```
@@ -73,14 +114,21 @@ Stock_Analyzer/
 │   └── api.py                   ← FastAPI server + APScheduler + SQLite REST API
 │
 ├── core/                        ← Production v2 architecture modules
+│   ├── pipeline.py              ← Orchestrator: symbol resolution + two-tier analysis
 │   ├── collectors/
 │   │   ├── nse.py               ← NSE live quotes, delivery%, FII/DII, options chain, bhavcopy
+│   │   ├── market_data.py       ← Multi-provider quote fallback (Groww, Twelve Data, AV, FMP, Finnhub)
 │   │   ├── global_data.py       ← Crude oil, USD/INR, US indices, India VIX, bond yields
 │   │   ├── fundamentals.py      ← Screener.in scraper + yfinance fundamentals
 │   │   └── news.py              ← Multi-source news + VADER/FinBERT sentiment pipeline
+│   ├── features/                ← Per-dimension feature computation
+│   │   ├── technical.py · fundamental.py · institutional.py
+│   │   ├── sentiment.py · regime.py
+│   │   └── store.py             ← Aggregates all features per symbol
 │   ├── lake/
 │   │   ├── manager.py           ← Thread-safe DuckDB connection manager
-│   │   └── schema.py            ← DDL for 12 analytical tables
+│   │   └── schema.py            ← DDL for 14 analytical tables (incl. caches)
+│   ├── events/                  ← Pipeline observability (local/Kafka event bus)
 │   ├── scoring/
 │   │   └── hybrid.py            ← Weighted multi-factor scoring (6 dimensions)
 │   ├── risk/
@@ -152,20 +200,16 @@ cd Stock_Analyzer
 pip install -r requirements.txt
 ```
 
-### 2. Configure email credentials
-Edit `Analyzer.py`:
-```python
-GMAIL_SENDER       = "your@gmail.com"
-GMAIL_APP_PASSWORD = "xxxx xxxx xxxx xxxx"   # 16-char Gmail App Password
-RECIPIENT_EMAIL    = "your@gmail.com"
-```
-
-Or set environment variables:
+### 2. Configure credentials
+Create a `.env` file in the project root (use `.env.nas.example` as the template):
 ```bash
-set GMAIL_SENDER=your@gmail.com
-set GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
-set RECIPIENT_EMAIL=your@gmail.com
+GMAIL_SENDER=your@gmail.com
+GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx   # 16-char Gmail App Password
+RECIPIENT_EMAIL=your@gmail.com
+# Optional: market-data API keys, provider order, Telegram, tuning knobs —
+# see .env.nas.example for the full list
 ```
+> ⚠️ Never hardcode credentials in source files and never commit `.env` — it's gitignored for a reason.
 
 ### 3. Start the backend
 ```bash
@@ -219,14 +263,14 @@ The FastAPI backend needs a persistent server (it runs scheduled jobs at 09:15 &
 | **Analysis Engine** | Python, yfinance, `ta` library, pandas, numpy |
 | **ML / Scoring** | scikit-learn, XGBoost, LightGBM, SHAP, HMM (regime) |
 | **Sentiment NLP** | VADER, FinBERT (ProsusAI/finbert via transformers) |
-| **Data Lake** | DuckDB (12 analytical tables) |
+| **Data Lake** | DuckDB (14 analytical tables incl. fundamentals + symbol caches) |
 | **Event Bus** | Apache Kafka (optional, via Docker) |
 | **Cache** | Redis (optional, via Docker) |
 | **Backtesting** | VectorBT (optional) + manual fallback engine |
 | **Backend API** | FastAPI, APScheduler, SQLite, Uvicorn |
 | **Frontend** | React 19, Vite, Recharts, Lucide React, Axios |
 | **Deployment** | Vercel (frontend), Railway/Hetzner (backend) |
-| **Data Sources** | NSE India, Yahoo Finance, Screener.in, GDELT, ET RSS, Google News, NewsAPI |
+| **Data Sources** | NSE India, Yahoo Finance, Groww, Screener.in, GDELT, ET RSS, Google News, NewsAPI |
 
 ---
 
