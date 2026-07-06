@@ -44,3 +44,6 @@ output.txt
 
 # -- graphify knowledge graph output (generated) --
 graphify-out/
+
+# -- personal work notes (local only) --
+NOTES-*.md
