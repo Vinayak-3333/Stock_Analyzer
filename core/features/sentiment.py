@@ -30,7 +30,8 @@ import time
 import xml.etree.ElementTree as ET
 from typing import List, Optional
 from urllib.parse import quote_plus
-from urllib.request import Request, urlopen
+
+from core.fetch import get_engine
 
 log = logging.getLogger("stockradar.features.sentiment")
 
@@ -167,7 +168,9 @@ def _fetch_yahoo_news(symbol: str, ticker: object = None) -> List[str]:
     try:
         import yfinance as yf
         tk = ticker or yf.Ticker(symbol)
-        news_items = getattr(tk, "news", None) or []
+        news_items = get_engine().call(
+            "yahoo", lambda: getattr(tk, "news", None) or []
+        )
         for item in news_items[:15]:
             title = item.get("title", "")
             if title:
@@ -186,10 +189,8 @@ def _fetch_google_news_rss(query: str) -> List[str]:
             f"https://news.google.com/rss/search?q={q}"
             f"&hl=en-IN&gl=IN&ceid=IN:en"
         )
-        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urlopen(req, timeout=8) as resp:
-            xml_bytes = resp.read()
-        root = ET.fromstring(xml_bytes)
+        resp = get_engine().get("google_news", url)
+        root = ET.fromstring(resp.content)
         for item in root.findall(".//item")[:15]:
             el = item.find("title")
             if el is not None and el.text:
@@ -216,10 +217,8 @@ def _fetch_et_rss() -> List[str]:
     headlines: List[str] = []
     url = "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"
     try:
-        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urlopen(req, timeout=8) as resp:
-            xml_bytes = resp.read()
-        root = ET.fromstring(xml_bytes)
+        resp = get_engine().get("et_rss", url)
+        root = ET.fromstring(resp.content)
         for item in root.findall(".//item")[:20]:
             el = item.find("title")
             if el is not None and el.text:

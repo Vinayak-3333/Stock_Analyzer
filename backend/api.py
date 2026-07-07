@@ -155,15 +155,36 @@ def save_run(market: dict, results: list, email_sent: bool):
 
 
 # ── Analysis job ───────────────────────────────────────────────────────────────
-_running = False   # prevent overlapping runs
+_running = False        # prevent overlapping runs
+_running_since = None   # when the in-flight run started
+# A run older than this is considered wedged; the guard stops protecting it so
+# the next scheduled run isn't silently skipped forever.
+ANALYSIS_STALE_MINUTES = int(os.environ.get("ANALYSIS_STALE_MINUTES", "90"))
+
+
+def _run_is_active() -> bool:
+    """True if a run is in flight and hasn't exceeded the stale budget."""
+    if not _running:
+        return False
+    if _running_since is None:
+        return True
+    age_min = (datetime.now() - _running_since).total_seconds() / 60
+    if age_min > ANALYSIS_STALE_MINUTES:
+        log.error(
+            "Analysis run started %.0f min ago looks wedged (budget %d min) — "
+            "allowing a new run", age_min, ANALYSIS_STALE_MINUTES,
+        )
+        return False
+    return True
 
 
 def analysis_job(send_email: bool = True):
-    global _running
-    if _running:
+    global _running, _running_since
+    if _run_is_active():
         log.warning("Analysis already running — skipping trigger")
         return
     _running = True
+    _running_since = datetime.now()
     log.info("=== Analysis job started ===")
     try:
         results = run_modular_analysis()
@@ -184,15 +205,20 @@ def analysis_job(send_email: bool = True):
         log.exception("Analysis job failed: %s", e)
     finally:
         _running = False
+        _running_since = None
 
 
 # ── Scheduler ──────────────────────────────────────────────────────────────────
 IST = pytz.timezone("Asia/Kolkata")
 scheduler = BackgroundScheduler(timezone=IST)
 
-# 09:15 IST and 15:30 IST, Mon–Fri
-scheduler.add_job(analysis_job, CronTrigger(day_of_week="mon-fri", hour=9,  minute=15, timezone=IST))
-scheduler.add_job(analysis_job, CronTrigger(day_of_week="mon-fri", hour=15, minute=30, timezone=IST))
+# 09:15 IST and 15:30 IST, Mon–Fri.  coalesce + misfire_grace_time let a
+# delayed job (e.g. the previous run overran) still fire once instead of
+# being dropped silently.
+scheduler.add_job(analysis_job, CronTrigger(day_of_week="mon-fri", hour=9,  minute=15, timezone=IST),
+                  coalesce=True, misfire_grace_time=3600, max_instances=1)
+scheduler.add_job(analysis_job, CronTrigger(day_of_week="mon-fri", hour=15, minute=30, timezone=IST),
+                  coalesce=True, misfire_grace_time=3600, max_instances=1)
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
 app = FastAPI(title="StockRadar IN API", version="2.0")
@@ -245,7 +271,8 @@ def status():
         last = conn.execute("SELECT run_time, email_sent FROM runs ORDER BY id DESC LIMIT 1").fetchone()
     return {
         "scheduler_running": scheduler.running,
-        "analysis_running":  _running,
+        "analysis_running":  _run_is_active(),
+        "analysis_started":  _running_since.isoformat() if _running_since else None,
         "scheduled_jobs":    jobs,
         "last_run":          dict(last) if last else None,
         "ist_now":           datetime.now(IST).isoformat(),
@@ -297,7 +324,7 @@ def get_run(run_id: int):
 @app.post("/api/trigger")
 def trigger(background_tasks: BackgroundTasks, email: bool = True):
     """Manually trigger analysis (runs in background)."""
-    if _running:
+    if _run_is_active():
         return {"status": "already_running", "message": "Analysis already in progress"}
     background_tasks.add_task(analysis_job, send_email=email)
     return {"status": "triggered", "message": "Analysis started in background"}
@@ -332,6 +359,13 @@ def factor_ic(days: int = 90):
         return JSONResponse(sanitize_floats(compute_factor_ic(days=days)))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/fetch-stats")
+def fetch_stats():
+    """Per-host fetch-engine metrics: calls, errors, retries, breaker state."""
+    from core.fetch import get_engine
+    return JSONResponse(sanitize_floats(get_engine().stats()))
 
 
 @app.get("/api/events/status")

@@ -49,6 +49,7 @@ from core.collectors.nse import (
 )
 from core.features.regime import compute_regime_features
 from core.features.store import compute_all_features
+from core.fetch import get_engine
 from core.lake.manager import close_lake, get_lake
 from core.lake.schema import init_schema
 from core.risk.engine import apply_risk_to_results
@@ -58,11 +59,21 @@ from core.events.engine import publish_risk_stage_events, publish_symbol_stage_e
 
 log = logging.getLogger("stockradar.pipeline")
 
-MAX_WORKERS = 8
+# Tier-2 worker pool: sized well above the old 8 because per-host limits now
+# live in the fetch engine (core/fetch) — extra workers wait on host gates
+# instead of hammering upstreams.
+MAX_WORKERS = int(os.getenv("TIER2_WORKERS", "32"))
+# Hard wall-clock budget for the Tier-2 deep-analysis stage.  When it runs
+# out the run continues with whatever finished — a stuck symbol can no
+# longer hang the whole pipeline (and the scheduler behind it).
+TIER2_DEADLINE_MINUTES = float(os.getenv("TIER2_DEADLINE_MINUTES", "20"))
 MIN_HISTORY_ROWS = 60
 MAX_SYMBOL_COUNT = 2000   # Tier-1 universe: screened with technicals only
 DEEP_ANALYSIS_COUNT = int(os.getenv("DEEP_ANALYSIS_COUNT", "400"))  # Tier-2: full deep analysis
 TIER1_CHUNK_SIZE = 100    # symbols per bulk yf.download call in the Tier-1 screen
+# Bulk yf.download chunks fetched in parallel (gated by the yahoo_bulk host
+# policy; keep small — Yahoo throttles on cumulative volume).
+BULK_PARALLEL_CHUNKS = int(os.getenv("BULK_PARALLEL_CHUNKS", "2"))
 
 
 def _clean_number(value: Any, default: float | None = None) -> float | None:
@@ -97,30 +108,45 @@ def _bulk_download_histories(symbols: list[str]) -> dict[str, pd.DataFrame]:
     call per symbol.  Returns {raw_symbol: DataFrame} for symbols with at
     least MIN_HISTORY_ROWS rows.
     """
-    histories: dict[str, pd.DataFrame] = {}
-    for start in range(0, len(symbols), TIER1_CHUNK_SIZE):
-        chunk = symbols[start:start + TIER1_CHUNK_SIZE]
+    engine = get_engine()
+    chunks = [
+        symbols[start:start + TIER1_CHUNK_SIZE]
+        for start in range(0, len(symbols), TIER1_CHUNK_SIZE)
+    ]
+
+    def _download_chunk(chunk: list[str]) -> pd.DataFrame | None:
         yf_syms = [s if s.endswith(".NS") else f"{s}.NS" for s in chunk]
-        try:
-            df = yf.download(
+        return engine.call(
+            "yahoo_bulk",
+            lambda: yf.download(
                 yf_syms, period="1y", interval="1d",
                 progress=False, auto_adjust=True,
                 group_by="ticker", threads=True,
-            )
-        except Exception as exc:
-            log.warning("Bulk history chunk %d–%d failed: %s", start, start + len(chunk), exc)
-            continue
-        if df is None or df.empty:
-            continue
-        multi = isinstance(df.columns, pd.MultiIndex)
-        for raw_sym, yf_sym in zip(chunk, yf_syms):
+            ),
+        )
+
+    histories: dict[str, pd.DataFrame] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=BULK_PARALLEL_CHUNKS) as pool:
+        futures = {pool.submit(_download_chunk, chunk): chunk for chunk in chunks}
+        for future in concurrent.futures.as_completed(futures):
+            chunk = futures[future]
             try:
-                sub = df[yf_sym] if multi else df
-                sub = sub.dropna(how="all")
-                if len(sub) >= MIN_HISTORY_ROWS:
-                    histories[raw_sym] = sub
-            except Exception:
+                df = future.result()
+            except Exception as exc:
+                log.warning("Bulk history chunk (%s…) failed: %s", chunk[0], exc)
                 continue
+            if df is None or df.empty:
+                continue
+            multi = isinstance(df.columns, pd.MultiIndex)
+            for raw_sym in chunk:
+                yf_sym = raw_sym if raw_sym.endswith(".NS") else f"{raw_sym}.NS"
+                try:
+                    sub = df[yf_sym] if multi else df
+                    sub = sub.dropna(how="all")
+                    if len(sub) >= MIN_HISTORY_ROWS:
+                        histories[raw_sym] = sub
+                except Exception:
+                    continue
     log.info(
         "Tier-1 bulk history: %d/%d symbols with >=%d rows",
         len(histories), len(symbols), MIN_HISTORY_ROWS,
@@ -178,23 +204,40 @@ def _fallback_quotes_from_yfinance(symbols: list[str]) -> dict[str, dict]:
                 len(targets), len(symbols),
             )
             time.sleep(30)
-        for start in range(0, len(targets), TIER1_CHUNK_SIZE):
-            chunk = targets[start:start + TIER1_CHUNK_SIZE]
-            try:
-                df = yf.download(
+
+        engine = get_engine()
+        quote_chunks = [
+            targets[start:start + TIER1_CHUNK_SIZE]
+            for start in range(0, len(targets), TIER1_CHUNK_SIZE)
+        ]
+
+        def _download_quote_chunk(chunk: list[str]) -> pd.DataFrame | None:
+            return engine.call(
+                "yahoo_bulk",
+                lambda: yf.download(
                     [sym_to_yfsym[s] for s in chunk],
                     period="5d",
                     interval="1d",
                     progress=False,
                     auto_adjust=True,
                     threads=True,
-                )
-            except Exception as exc:
-                log.warning("Yahoo OHLCV chunk %d–%d failed: %s", start, start + len(chunk), exc)
-                continue
-            if df is None or df.empty:
-                continue
+                ),
+            )
 
+        chunk_frames: list[tuple[list[str], pd.DataFrame]] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=BULK_PARALLEL_CHUNKS) as pool:
+            chunk_futures = {pool.submit(_download_quote_chunk, c): c for c in quote_chunks}
+            for future in concurrent.futures.as_completed(chunk_futures):
+                chunk = chunk_futures[future]
+                try:
+                    df = future.result()
+                except Exception as exc:
+                    log.warning("Yahoo OHLCV chunk (%s…) failed: %s", chunk[0], exc)
+                    continue
+                if df is not None and not df.empty:
+                    chunk_frames.append((chunk, df))
+
+        for chunk, df in chunk_frames:
             for raw_sym in chunk:
                 yf_sym = sym_to_yfsym[raw_sym]
                 try:
@@ -246,7 +289,7 @@ def _fallback_quotes_from_yfinance(symbols: list[str]) -> dict[str, dict]:
         yf_sym = sym_to_yfsym.get(raw_sym, f"{raw_sym}.NS")
         try:
             ticker = yf.Ticker(yf_sym)
-            fi = ticker.fast_info
+            fi = get_engine().call("yahoo", lambda: ticker.fast_info)
 
             year_high = _clean_number(getattr(fi, "year_high", None))
             year_low  = _clean_number(getattr(fi, "year_low", None))
@@ -495,38 +538,38 @@ def _result_from_features(symbol: str, features: dict, quote: dict, score_result
 
 
 def analyse_symbol(symbol: str, quote: dict, nifty_df: pd.DataFrame | None, regime: dict | None, market: dict, session: object, history: pd.DataFrame | None = None) -> dict | None:
-    try:
-        yf_symbol = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
-        df = history if history is not None else _download_history(yf_symbol)
-        if df is None:
-            return None
+    # NOTE: the thread-local DuckDB connection is intentionally NOT closed
+    # here — workers analyse many symbols each, and closing/reopening the
+    # lake per symbol cost hundreds of reconnects per run.
+    yf_symbol = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
+    df = history if history is not None else _download_history(yf_symbol)
+    if df is None:
+        return None
 
-        _store_ohlcv(symbol, df)
-        ticker = yf.Ticker(yf_symbol)
-        features = compute_all_features(
-            yf_symbol,
-            df,
-            nifty_df=nifty_df,
-            regime=regime,
-            ticker=ticker,
-            nse_session=session,
-            company_name=quote.get("companyName") or symbol,
-        )
-        fundamental, technical, institutional, sentiment, score_market, stock_meta = _score_inputs(features, quote, market)
-        score_result = calculate_final_score(
-            fundamental=fundamental,
-            technical=technical,
-            institutional=institutional,
-            sentiment=sentiment,
-            market=score_market,
-            stock_meta=stock_meta,
-            regime=_regime_code(regime),
-        )
-        result = _result_from_features(yf_symbol, features, quote, score_result)
-        publish_symbol_stage_events(yf_symbol, quote, features, result)
-        return result
-    finally:
-        close_lake()
+    _store_ohlcv(symbol, df)
+    ticker = yf.Ticker(yf_symbol)
+    features = compute_all_features(
+        yf_symbol,
+        df,
+        nifty_df=nifty_df,
+        regime=regime,
+        ticker=ticker,
+        nse_session=session,
+        company_name=quote.get("companyName") or symbol,
+    )
+    fundamental, technical, institutional, sentiment, score_market, stock_meta = _score_inputs(features, quote, market)
+    score_result = calculate_final_score(
+        fundamental=fundamental,
+        technical=technical,
+        institutional=institutional,
+        sentiment=sentiment,
+        market=score_market,
+        stock_meta=stock_meta,
+        regime=_regime_code(regime),
+    )
+    result = _result_from_features(yf_symbol, features, quote, score_result)
+    publish_symbol_stage_events(yf_symbol, quote, features, result)
+    return result
 
 
 def _fetch_broad_nse_symbols() -> list[str]:
@@ -535,14 +578,13 @@ def _fetch_broad_nse_symbols() -> list[str]:
     This is a lightweight CSV hosted by NSE — not rate-limited.
     """
     try:
-        import requests as _req
         import io
-        r = _req.get(
+        r = get_engine().get(
+            "nse_archives",
             "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
             headers={"User-Agent": _UA},
-            timeout=15,
         )
-        if r.status_code == 200 and len(r.content) > 1000:
+        if len(r.content) > 1000:
             eq_df = pd.read_csv(io.StringIO(r.text))
             eq_df.columns = eq_df.columns.str.strip()
             if "SERIES" in eq_df.columns:
@@ -704,20 +746,49 @@ def run_modular_analysis(limit: int | None = None) -> list[dict]:
         )
 
         # ── Tier 2: full deep analysis (fundamentals/news/delivery) on top N ──
+        # No `with` block: shutdown(wait=True) would block forever on a hung
+        # worker.  The as_completed deadline caps the stage; unfinished
+        # symbols are dropped and the run completes with partial results.
         results: list[dict] = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {
-                executor.submit(analyse_symbol, sym, quotes.get(sym, {}), nifty_df, regime, market, session, df): sym
-                for sym, _tech_score, df in shortlist
-            }
-            for future in concurrent.futures.as_completed(futures):
+        tier2_start = time.monotonic()
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        futures = {
+            executor.submit(analyse_symbol, sym, quotes.get(sym, {}), nifty_df, regime, market, session, df): sym
+            for sym, _tech_score, df in shortlist
+        }
+        done_count = 0
+        try:
+            for future in concurrent.futures.as_completed(
+                futures, timeout=TIER2_DEADLINE_MINUTES * 60
+            ):
                 sym = futures[future]
+                done_count += 1
                 try:
                     result = future.result()
                     if result:
                         results.append(result)
                 except Exception as exc:
                     log.exception("Modular analysis failed for %s: %s", sym, exc)
+                if done_count % 50 == 0:
+                    log.info(
+                        "Tier 2 progress: %d/%d symbols (%.0fs elapsed)",
+                        done_count, len(futures), time.monotonic() - tier2_start,
+                    )
+        except concurrent.futures.TimeoutError:
+            unfinished = [s for f, s in futures.items() if not f.done()]
+            log.error(
+                "Tier-2 deadline (%.0f min) hit — %d/%d symbols unfinished, "
+                "continuing with partial results: %s",
+                TIER2_DEADLINE_MINUTES, len(unfinished), len(futures),
+                ", ".join(unfinished[:15]),
+            )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        log.info(
+            "Tier 2 finished: %d results from %d symbols in %.0fs",
+            len(results), len(futures), time.monotonic() - tier2_start,
+        )
+        get_engine().log_summary("Fetch engine (run totals)")
 
         results = apply_risk_to_results(results)
         publish_risk_stage_events(results)

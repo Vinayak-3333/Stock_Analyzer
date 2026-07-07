@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
+import time
 from typing import Any, Optional
 
 log = logging.getLogger("stockradar.features.institutional")
@@ -188,6 +190,64 @@ def _get_fii_dii_history(days: int = 3) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Market-wide caches (shared across every symbol in a run)
+# ---------------------------------------------------------------------------
+# FII/DII flow and the F&O universe are identical for all ~400 Tier-2 symbols;
+# resolving them per symbol multiplied lake queries and NSE calls by 400.
+
+_FII_DII_TTL_SECONDS = 30 * 60
+_fii_dii_cache: tuple[float, tuple[float, float, bool]] | None = None
+_fii_dii_lock = threading.Lock()
+
+
+def _resolve_fii_dii_3d(session) -> tuple[float, float, bool]:
+    """Return (fii_net_3d, dii_net_3d, divergence), cached for 30 minutes."""
+    global _fii_dii_cache
+    with _fii_dii_lock:
+        if _fii_dii_cache is not None and time.time() - _fii_dii_cache[0] < _FII_DII_TTL_SECONDS:
+            return _fii_dii_cache[1]
+
+        history = _get_fii_dii_history(days=3)
+        if len(history) < 3:
+            today = _fetch_fii_dii_safe(session)
+            if today:
+                # Avoid double-counting: only prepend if today isn't already
+                # in the lake result set (simple heuristic — compare fii_net)
+                if not history or history[0].get("fii_net") != today.get("fii_net"):
+                    history.insert(0, {
+                        "fii_net": today.get("fii_net"),
+                        "dii_net": today.get("dii_net"),
+                    })
+
+        fii_vals = [_safe_float(h.get("fii_net")) for h in history]
+        dii_vals = [_safe_float(h.get("dii_net")) for h in history]
+        fii_3d = round(sum(fii_vals), 2)
+        dii_3d = round(sum(dii_vals), 2)
+        divergence = bool(fii_vals and dii_vals and fii_3d < 0 and dii_3d > 0)
+
+        result = (fii_3d, dii_3d, divergence)
+        _fii_dii_cache = (time.time(), result)
+        return result
+
+
+def _symbol_has_options(symbol: str, session) -> bool:
+    """
+    True if *symbol* is in the F&O universe.  When the F&O list cannot be
+    fetched at all, err on the side of trying (returns True) so a listing
+    outage doesn't silently drop option features for every stock.
+    """
+    try:
+        from core.collectors.nse import fetch_fno_symbols
+        fno = fetch_fno_symbols(session)
+        if not fno:
+            return True
+        return symbol.replace(".NS", "").upper() in fno
+    except Exception as exc:
+        log.debug("F&O universe check failed for %s: %s", symbol, exc)
+        return True
+
+
+# ---------------------------------------------------------------------------
 # Main feature computation
 # ---------------------------------------------------------------------------
 
@@ -236,33 +296,12 @@ def compute_institutional_features(
         "oi_buildup_bullish":    False,
     }
 
-    # ── 1. FII / DII 3-day cumulative flow ────────────────────────────────
+    # ── 1. FII / DII 3-day cumulative flow (market-wide, cached 30 min) ───
     try:
-        history = _get_fii_dii_history(days=3)
-
-        # If the lake has fewer than 3 days, supplement with today's API hit
-        if len(history) < 3:
-            today = _fetch_fii_dii_safe(session)
-            if today:
-                # Avoid double-counting: only prepend if today isn't already
-                # in the lake result set (simple heuristic — compare fii_net)
-                if not history or history[0].get("fii_net") != today.get("fii_net"):
-                    history.insert(0, {
-                        "fii_net": today.get("fii_net"),
-                        "dii_net": today.get("dii_net"),
-                    })
-
-        fii_vals = [_safe_float(h.get("fii_net")) for h in history]
-        dii_vals = [_safe_float(h.get("dii_net")) for h in history]
-
-        features["fii_net_3d"] = round(sum(fii_vals), 2)
-        features["dii_net_3d"] = round(sum(dii_vals), 2)
-
-        # Divergence: FII selling (net < 0) while DII buying (net > 0)
-        if fii_vals and dii_vals:
-            features["fii_dii_divergence"] = (
-                features["fii_net_3d"] < 0 and features["dii_net_3d"] > 0
-            )
+        fii_3d, dii_3d, divergence = _resolve_fii_dii_3d(session)
+        features["fii_net_3d"] = fii_3d
+        features["dii_net_3d"] = dii_3d
+        features["fii_dii_divergence"] = divergence
     except Exception as exc:
         log.warning("FII/DII feature computation failed: %s", exc)
 
@@ -304,9 +343,11 @@ def compute_institutional_features(
     except Exception as exc:
         log.warning("Delivery feature computation failed for %s: %s", symbol, exc)
 
-    # ── 3. Option chain: PCR, max-pain, OI buildup ────────────────────────
+    # ── 3. Option chain: PCR, max-pain, OI buildup (F&O symbols only) ─────
     try:
-        oc = _fetch_option_chain_safe(session, symbol)
+        oc = None
+        if _symbol_has_options(symbol, session):
+            oc = _fetch_option_chain_safe(session, symbol)
         if oc:
             pcr_val = oc.get("pcr")
             features["pcr"] = round(float(pcr_val), 3) if pcr_val is not None else None

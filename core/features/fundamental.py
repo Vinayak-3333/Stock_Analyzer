@@ -20,9 +20,9 @@ import json
 import logging
 import math
 import os
-import random
-import time
 from typing import Any, Optional
+
+from core.fetch import get_engine
 
 log = logging.getLogger("stockradar.features.fundamental")
 
@@ -88,11 +88,6 @@ def _pct(val: Any) -> Optional[float]:
     if -1.0 <= v <= 1.0:
         return round(v * 100, 2)
     return round(v, 2)
-
-
-def _rate_limit_sleep() -> None:
-    """Sleep a small random duration to respect yfinance rate limits."""
-    time.sleep(random.uniform(0.1, 0.4))
 
 
 # ── Lake-backed cache ──────────────────────────────────────────────────────────
@@ -179,17 +174,20 @@ def compute_fundamental_features(
     if tk is None:
         try:
             import yfinance as yf  # lazy import — heavy dependency
-            _rate_limit_sleep()
             tk = yf.Ticker(symbol)
         except Exception as exc:
             log.error("Failed to create yfinance Ticker for %s: %s", symbol, exc)
             return features
 
+    # All yfinance property fetches below go through the fetch engine's
+    # "yahoo" host — shared concurrency cap + pacing replaces the old
+    # per-call random sleeps.
+    engine = get_engine()
+
     # ── 2. Fetch info dict ──────────────────────────────────────────────────
     info: dict = {}
     try:
-        _rate_limit_sleep()
-        info = tk.info or {}
+        info = engine.call("yahoo", lambda: tk.info or {})
     except Exception as exc:
         log.warning("Could not fetch .info for %s: %s", symbol, exc)
 
@@ -250,8 +248,7 @@ def compute_fundamental_features(
 
     # ── 4. Promoter / insider holding ───────────────────────────────────────
     try:
-        _rate_limit_sleep()
-        holders = tk.major_holders
+        holders = engine.call("yahoo", lambda: tk.major_holders)
         if holders is not None and not holders.empty:
             # major_holders is a 2-column DataFrame; col 0 = value, col 1 = label
             for _, row in holders.iterrows():
@@ -274,8 +271,7 @@ def compute_fundamental_features(
     # ── 5. Fallback: try quarterly financials for growth if info was empty ──
     if features["eps_growth_1y"] is None:
         try:
-            _rate_limit_sleep()
-            qf = tk.quarterly_financials
+            qf = engine.call("yahoo", lambda: tk.quarterly_financials)
             if qf is not None and not qf.empty:
                 if "Net Income" in qf.index and qf.shape[1] >= 5:
                     recent_4q = qf.loc["Net Income"].iloc[:4].sum()
@@ -289,8 +285,7 @@ def compute_fundamental_features(
 
     if features["revenue_growth_1y"] is None:
         try:
-            _rate_limit_sleep()
-            qf = tk.quarterly_financials
+            qf = engine.call("yahoo", lambda: tk.quarterly_financials)
             if qf is not None and not qf.empty:
                 label = None
                 for candidate in ("Total Revenue", "Revenue", "Operating Revenue"):
@@ -310,8 +305,7 @@ def compute_fundamental_features(
     # ── 6. Fallback: balance sheet for D/E and current ratio ────────────────
     if features["debt_to_equity"] is None or features["current_ratio"] is None:
         try:
-            _rate_limit_sleep()
-            bs = tk.balance_sheet
+            bs = engine.call("yahoo", lambda: tk.balance_sheet)
             if bs is not None and not bs.empty:
                 if features["debt_to_equity"] is None:
                     total_debt = None

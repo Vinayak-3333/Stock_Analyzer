@@ -18,6 +18,7 @@ Kafka topics published:
 """
 
 import requests
+import threading
 import time
 import json
 import uuid
@@ -28,6 +29,8 @@ from datetime import datetime, date, timedelta
 from typing import Optional
 
 import pandas as pd
+
+from core.fetch import CircuitOpen, get_engine
 
 log = logging.getLogger("stockradar.collectors.nse")
 
@@ -93,18 +96,23 @@ def _make_session() -> requests.Session:
 
 def _nse_get(session: requests.Session, endpoint: str, params: dict = None, retries=2):
     url = f"{_NSE_API}/{endpoint}"
-    for attempt in range(retries + 1):
-        try:
-            r = session.get(url, params=params, timeout=12)
-            if r.status_code == 200 and r.content:
-                return r.json()
-            if r.status_code == 401:
-                # Cookie expired — refresh session
-                session.get(_NSE_BASE, timeout=12)
-                time.sleep(1)
-        except Exception as e:
-            log.debug("NSE get %s attempt %d failed: %s", endpoint, attempt, e)
-            time.sleep(1)
+    engine = get_engine()
+
+    def _attempt():
+        r = session.get(url, params=params, timeout=12)
+        if r.status_code == 200 and r.content:
+            return r.json()
+        if r.status_code == 401:
+            # Cookie expired — refresh and let the engine's retry re-attempt
+            session.get(_NSE_BASE, timeout=12)
+        raise requests.HTTPError(f"{r.status_code} for {endpoint}", response=r)
+
+    try:
+        return engine.call("nse", _attempt, retries=retries)
+    except CircuitOpen as e:
+        log.debug("NSE get %s skipped: %s", endpoint, e)
+    except Exception as e:
+        log.debug("NSE get %s failed: %s", endpoint, e)
     return None
 
 
@@ -437,8 +445,8 @@ def fetch_bhavcopy(target_date: date = None) -> Optional[pd.DataFrame]:
         )
         try:
             headers = {"User-Agent": _UA, "Referer": _NSE_BASE + "/"}
-            r = requests.get(url, headers=headers, timeout=20)
-            if r.status_code == 200 and len(r.content) > 1000:
+            r = get_engine().get("nse_archives", url, headers=headers, retries=0)
+            if len(r.content) > 1000:
                 df = pd.read_csv(io.StringIO(r.text))
                 df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
                 df["date"] = d.isoformat()
@@ -446,7 +454,6 @@ def fetch_bhavcopy(target_date: date = None) -> Optional[pd.DataFrame]:
                 return df
         except Exception as e:
             log.debug("Bhavcopy %s failed: %s", d, e)
-        time.sleep(0.5)
 
     log.warning("Bhavcopy not available for recent dates")
     return None
@@ -569,6 +576,66 @@ def run_full_collection(
 
     log.info("NSE collection complete: %s", summary)
     return summary
+
+
+# ── 5b. F&O symbol universe ───────────────────────────────────────────────────
+# Only ~180-220 NSE stocks have derivative contracts. Option-chain calls for
+# anything else are guaranteed failures that burn retries and timeouts, so the
+# pipeline gates per-symbol option fetches on this list.
+
+_FNO_CACHE_TTL_SECONDS = 12 * 3600
+_fno_cache: tuple[float, set[str]] | None = None
+_fno_lock = threading.Lock()
+
+
+def fetch_fno_symbols(session: requests.Session = None) -> set[str]:
+    """
+    Return the set of NSE symbols with F&O contracts, cached in-process for
+    12 hours.  Primary source is the derivatives master (fo_mktlots.csv on
+    the archives host); falls back to the live equity-derivatives master
+    API.  Returns an empty set when both fail — callers should treat that
+    as "unknown" rather than "no F&O".
+    """
+    global _fno_cache
+    with _fno_lock:
+        if _fno_cache is not None and time.time() - _fno_cache[0] < _FNO_CACHE_TTL_SECONDS:
+            return _fno_cache[1]
+
+    symbols: set[str] = set()
+
+    # Primary: F&O market-lots CSV (static archives host, no cookies needed)
+    try:
+        r = get_engine().get(
+            "nse_archives",
+            "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv",
+            headers={"User-Agent": _UA, "Referer": _NSE_BASE + "/"},
+        )
+        for line in r.text.splitlines()[1:]:
+            parts = line.split(",")
+            if len(parts) >= 2:
+                sym = parts[1].strip()
+                if sym and sym.upper() not in ("SYMBOL", ""):
+                    symbols.add(sym)
+    except Exception as e:
+        log.debug("fo_mktlots.csv fetch failed: %s", e)
+
+    # Fallback: live master API
+    if not symbols:
+        try:
+            sess = session or _make_session()
+            data = _nse_get(sess, "master-quote")
+            if isinstance(data, list):
+                symbols = {str(s).strip() for s in data if s}
+        except Exception as e:
+            log.debug("master-quote F&O fallback failed: %s", e)
+
+    if symbols:
+        with _fno_lock:
+            _fno_cache = (time.time(), symbols)
+        log.info("F&O universe: %d symbols", len(symbols))
+    else:
+        log.warning("F&O symbol list unavailable from all sources")
+    return symbols
 
 
 # ── 6. Dynamic symbol helpers (for pipeline cascading) ───────────────────────

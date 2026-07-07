@@ -48,7 +48,8 @@ FastAPI + APScheduler. Cron-fires the modular pipeline at 09:15 and 15:30 IST on
 ### core/ module layout
 
 - `collectors/` — external data: `nse.py` (NSE live quotes from 26 indices, delivery %, FII/DII, options, bhavcopy — requires a warmed-up session with browser headers; also provides `fetch_equity_symbols_from_bhavcopy()`, `fetch_cached_symbols_from_lake()`, and `save_known_symbols_to_lake()` for dynamic symbol resolution), `market_data.py` (multi-provider fallback chain controlled by `MARKET_DATA_PROVIDER_ORDER` — includes Groww, Twelve Data, Alpha Vantage, FMP, Finnhub), `global_data.py`, `fundamentals.py`, `news.py`
-- `features/` — per-dimension feature computation (`technical`, `fundamental`, `institutional`, `sentiment`, `regime`), aggregated by `features/store.py`
+- `fetch/` — central outbound-HTTP engine (`engine.py`): every collector call goes through a per-host policy (concurrency semaphore, request pacing, timeouts, retries with jittered backoff, circuit breaker, metrics). Hosts: `yahoo`, `yahoo_bulk`, `nse`, `nse_archives`, `google_news`, `et_rss`, `screener`. Tunable via `FETCH_<HOST>_CONCURRENCY` / `_MIN_INTERVAL_MS` / `_TIMEOUT` / `_RETRIES` env vars; stats at `GET /api/fetch-stats`. Route any new outbound HTTP through `get_engine()`, never raw `requests`.
+- `features/` — per-dimension feature computation (`technical`, `fundamental`, `institutional`, `sentiment`, `regime`), aggregated by `features/store.py`. Institutional features fetch option chains only for F&O symbols (`fetch_fno_symbols`) and cache market-wide FII/DII for 30 min.
 - `scoring/hybrid.py` — weighted 6-dimension score (fundamental 30%, technical 25%, institutional 15%, sentiment 10%, sector 10%, risk 10%) with a bull/bear regime multiplier; score maps to BUY (≥75) / WATCH (60–74) / HOLD (40–59) / SELL (<40)
 - `risk/engine.py` — ATR stops, Kelly sizing, applied to scored results
 - `lake/` — DuckDB data lake; `manager.py` is a thread-safe connection manager (use `get_lake()` / `close_lake()`, never open connections directly), `schema.py` holds the DDL
@@ -61,7 +62,7 @@ FinBERT (`transformers`/`torch`) and VectorBT are commented out in `requirements
 
 ### Configuration
 
-`.env` at the project root is loaded by both `backend/api.py` and `core/pipeline.py` (works regardless of launch CWD); missing keys are backfilled from `.env.nas.example`. Key vars: `GMAIL_SENDER` / `GMAIL_APP_PASSWORD` / `RECIPIENT_EMAIL`, market-data API keys (`FINNHUB_API_KEY`, `TWELVE_DATA_API_KEY`, `FMP_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `NEWSAPI_KEY`), `MARKET_DATA_PROVIDER_ORDER`, `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`, `DEEP_ANALYSIS_COUNT` (Tier-2 shortlist size, default 400), `FUNDAMENTALS_CACHE_TTL_DAYS` (DuckDB fundamentals cache TTL, default 7).
+`.env` at the project root is loaded by both `backend/api.py` and `core/pipeline.py` (works regardless of launch CWD); missing keys are backfilled from `.env.nas.example`. Key vars: `GMAIL_SENDER` / `GMAIL_APP_PASSWORD` / `RECIPIENT_EMAIL`, market-data API keys (`FINNHUB_API_KEY`, `TWELVE_DATA_API_KEY`, `FMP_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `NEWSAPI_KEY`), `MARKET_DATA_PROVIDER_ORDER`, `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`, `DEEP_ANALYSIS_COUNT` (Tier-2 shortlist size, default 400), `FUNDAMENTALS_CACHE_TTL_DAYS` (DuckDB fundamentals cache TTL, default 7), `TIER2_WORKERS` (Tier-2 thread pool, default 32), `TIER2_DEADLINE_MINUTES` (hard Tier-2 wall-clock budget, default 20 — run continues with partial results), `BULK_PARALLEL_CHUNKS` (parallel bulk yf.download chunks, default 2), `ANALYSIS_STALE_MINUTES` (wedged-run guard in the backend, default 90).
 
 ### Frontend (`frontend/`)
 
