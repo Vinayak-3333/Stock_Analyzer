@@ -77,6 +77,48 @@ NSE_INDEX_MAP = {
 }
 
 
+# Warm-up coordination: NSE's Akamai cookies expire mid-run, and when they do
+# every one of the ~32 Tier-2 workers sees 401s at once.  The lock + recency
+# gate below make sure exactly one worker re-warms the shared session while
+# the rest simply retry against the refreshed cookies.
+_warm_lock = threading.Lock()
+_WARM_MIN_GAP_SECONDS = 45
+
+# Browser-like headers for the warm-up page loads (the session's default
+# headers are JSON/API-flavoured after _make_session()).
+_WARM_PAGE_HEADERS = {
+    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+               "image/avif,image/webp,*/*;q=0.8"),
+    "Referer": _NSE_BASE + "/",
+}
+
+
+def _warm_session(session, force: bool = False) -> None:
+    """
+    Two-step NSE warm-up: the homepage sets the Akamai cookies, the
+    live-equity-market page arms the API gate.  Safe to call from many
+    threads — re-warms at most once per _WARM_MIN_GAP_SECONDS.
+    """
+    with _warm_lock:
+        last = getattr(session, "_nse_warmed_at", 0.0)
+        if not force and time.monotonic() - last < _WARM_MIN_GAP_SECONDS:
+            return  # another worker just re-warmed this session
+        try:
+            r = session.get(_NSE_BASE, headers=_WARM_PAGE_HEADERS, timeout=12)
+            time.sleep(0.3)
+            session.get(
+                _NSE_BASE + "/market-data/live-equity-market",
+                headers=_WARM_PAGE_HEADERS, timeout=12,
+            )
+            if getattr(r, "status_code", None) != 200:
+                log.warning("NSE warm-up homepage returned %s",
+                            getattr(r, "status_code", "?"))
+        except Exception as e:
+            log.warning("NSE session warm-up failed: %s", e)
+        finally:
+            session._nse_warmed_at = time.monotonic()
+
+
 def _make_session():
     """
     Build a warmed-up NSE session.
@@ -85,10 +127,8 @@ def _make_session():
     handshake itself — plain `requests` gets a cookieless 403 regardless of
     headers.  `curl_cffi` with Chrome impersonation passes, so it is the
     primary path (it ships as a yfinance dependency); plain requests remains
-    as a last-resort fallback.  Warm-up is two-step: the homepage sets the
-    Akamai cookies, the live-equity-market page arms the API gate.
+    as a last-resort fallback.
     """
-    session = None
     try:
         from curl_cffi import requests as cffi_requests
         session = cffi_requests.Session(impersonate="chrome")
@@ -97,15 +137,7 @@ def _make_session():
         session = requests.Session()
         session.headers.update({"User-Agent": _UA})
 
-    try:
-        r = session.get(_NSE_BASE, timeout=12)
-        time.sleep(0.4)
-        session.get(_NSE_BASE + "/market-data/live-equity-market", timeout=12)
-        time.sleep(0.4)
-        if getattr(r, "status_code", None) != 200:
-            log.warning("NSE warm-up homepage returned %s", getattr(r, "status_code", "?"))
-    except Exception as e:
-        log.warning("NSE session warm-up failed: %s", e)
+    _warm_session(session, force=True)
 
     session.headers.update({
         "Accept":           "application/json, text/plain, */*",
@@ -124,9 +156,10 @@ def _nse_get(session: requests.Session, endpoint: str, params: dict = None, retr
         r = session.get(url, params=params, timeout=12)
         if r.status_code == 200 and r.content:
             return r.json()
-        if r.status_code == 401:
-            # Cookie expired — refresh and let the engine's retry re-attempt
-            session.get(_NSE_BASE, timeout=12)
+        if r.status_code in (401, 403):
+            # Cookies expired mid-run — full two-step re-warm (stampede-
+            # protected), then the engine's retry re-attempts the call.
+            _warm_session(session)
         raise requests.HTTPError(f"{r.status_code} for {endpoint}", response=r)
 
     try:
@@ -148,6 +181,8 @@ def _get_producer():
             value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
             linger_ms=50,
             compression_type="gzip",
+            api_version_auto_timeout_ms=2000,   # fail fast when no broker
+            max_block_ms=2000,
         )
         return producer
     except Exception as e:
@@ -156,16 +191,29 @@ def _get_producer():
 
 
 _producer = None
+_producer_failed_at = 0.0
+_PRODUCER_RETRY_SECONDS = 600  # don't re-attempt broker connection for 10 min
+
 
 def _publish(topic: str, data: dict):
-    global _producer
+    """
+    Publish to Kafka if a broker is available. When it isn't, remember the
+    failure: _publish is called once per stock (~350×/run), and re-attempting
+    the broker connection each time cost ~4s per call — a silent ~25-minute
+    stall in Step 1 whenever Kafka was down.
+    """
+    global _producer, _producer_failed_at
     if _producer is None:
+        if time.time() - _producer_failed_at < _PRODUCER_RETRY_SECONDS:
+            return
         _producer = _get_producer()
-    if _producer:
-        try:
-            _producer.send(topic, data)
-        except Exception as e:
-            log.debug("Kafka publish failed: %s", e)
+        if _producer is None:
+            _producer_failed_at = time.time()
+            return
+    try:
+        _producer.send(topic, data)
+    except Exception as e:
+        log.debug("Kafka publish failed: %s", e)
 
 
 # ── 1. Equity Quotes ──────────────────────────────────────────────────────────
@@ -517,22 +565,39 @@ def save_bhavcopy_to_lake(df: pd.DataFrame):
         return
     conn = get_lake()
 
-    # Map column names (NSE bhavcopy has different column names)
+    # Map column names.  The full bhavcopy (sec_bhavdata_full) uses
+    # TTL_TRD_QNTY / TURNOVER_LACS / NO_OF_TRADES / DELIV_QTY / DELIV_PER;
+    # the old cm bhavcopy used TOTTRDQTY / TOTTRDVAL / TOTALTRADES / ISIN.
+    # Values arrive as space-padded strings ('-' where not applicable), so
+    # numeric columns are coerced.  Missing targets become NULL instead of
+    # breaking the INSERT (which silently killed this save for months).
     col_map = {
         "symbol": "symbol", "series": "series",
         "open_price": "open", "high_price": "high",
         "low_price": "low", "close_price": "close",
-        "last_price": "last", "prev_close": "prev_close",
-        "tottrdqty": "traded_qty", "tottrdval": "traded_value",
-        "totaltrades": "total_trades", "isin_code": "isin",
+        "prev_close": "prev_close",
+        "tottrdqty": "traded_qty", "ttl_trd_qnty": "traded_qty",
+        "tottrdval": "traded_value", "turnover_lacs": "traded_value",
+        "totaltrades": "total_trades", "no_of_trades": "total_trades",
+        "isin_code": "isin",
     }
     available = {k: v for k, v in col_map.items() if k in df.columns}
     df_mapped = df[list(available.keys())].rename(columns=available)
+    df_mapped = df_mapped.loc[:, ~df_mapped.columns.duplicated()]
     df_mapped["date"] = df["date"]
 
+    numeric_cols = ["open", "high", "low", "close", "prev_close",
+                    "traded_qty", "traded_value", "total_trades"]
+    for target in ["symbol", "series", "isin"] + numeric_cols:
+        if target not in df_mapped.columns:
+            df_mapped[target] = None
+    for col in numeric_cols:
+        df_mapped[col] = pd.to_numeric(df_mapped[col], errors="coerce")
+    df_mapped["symbol"] = df_mapped["symbol"].astype(str).str.strip()
+
     # Filter EQ series only
-    if "series" in df_mapped.columns:
-        df_mapped = df_mapped[df_mapped["series"].str.strip() == "EQ"]
+    if df_mapped["series"].notna().any():
+        df_mapped = df_mapped[df_mapped["series"].astype(str).str.strip() == "EQ"]
 
     conn.execute("""
         INSERT OR REPLACE INTO raw_bhavcopy
@@ -542,18 +607,31 @@ def save_bhavcopy_to_lake(df: pd.DataFrame):
         FROM df_mapped
     """)
 
-    # Extract delivery if columns present
-    if "deliv_qty" in df.columns and "tottrdqty" in df.columns:
-        df["delivery_pct"] = (df["deliv_qty"] / df["tottrdqty"] * 100).round(2)
-        df_del = df[["symbol", "date", "tottrdqty", "deliv_qty", "delivery_pct"]].copy()
-        df_del.columns = ["symbol", "date", "traded_qty", "delivered_qty", "delivery_pct"]
+    # Extract delivery if columns present (either bhavcopy generation)
+    qty_col = next((c for c in ("tottrdqty", "ttl_trd_qnty") if c in df.columns), None)
+    if "deliv_qty" in df.columns and qty_col:
+        traded = pd.to_numeric(df[qty_col], errors="coerce")
+        delivered = pd.to_numeric(df["deliv_qty"], errors="coerce")
+        if "deliv_per" in df.columns:
+            pct = pd.to_numeric(df["deliv_per"], errors="coerce")
+        else:
+            pct = (delivered / traded * 100).round(2)
+        df_del = pd.DataFrame({
+            "symbol": df["symbol"].astype(str).str.strip(),
+            "date": df["date"],
+            "traded_qty": traded,
+            "delivered_qty": delivered,
+            "delivery_pct": pct,
+        })
         if "series" in df.columns:
-            df_del = df_del[df["series"].str.strip() == "EQ"]
+            df_del = df_del[df["series"].astype(str).str.strip() == "EQ"]
+        df_del = df_del.dropna(subset=["delivery_pct"])
         conn.execute("""
             INSERT OR REPLACE INTO raw_delivery (symbol, date, traded_qty, delivered_qty, delivery_pct)
             SELECT symbol, date::DATE, traded_qty, delivered_qty, delivery_pct
             FROM df_del
         """)
+        log.info("Bhavcopy delivery extracted: %d symbols", len(df_del))
 
     conn.commit()
     log.info("Saved bhavcopy (%d rows) to lake", len(df_mapped))

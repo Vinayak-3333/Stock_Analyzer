@@ -69,6 +69,7 @@ class HostPolicy:
     backoff_base: float = 1.0     # sleep before first retry; doubles per retry
     breaker_threshold: int = 10   # consecutive failures that open the breaker
     breaker_cooldown: float = 60.0
+    queue_timeout: float | None = None  # max wait for a slot (None → 2×timeout, min 30s)
 
 
 _DEFAULT_POLICIES: dict[str, HostPolicy] = {
@@ -79,10 +80,14 @@ _DEFAULT_POLICIES: dict[str, HostPolicy] = {
     "yahoo_bulk":   HostPolicy("yahoo_bulk", max_concurrent=2, min_interval=0.5,
                                timeout=120, retries=1, backoff_base=5.0,
                                breaker_threshold=6, breaker_cooldown=120),
-    # NSE JSON API (cookie session, aggressive anti-bot)
-    "nse":          HostPolicy("nse", max_concurrent=4, min_interval=0.12,
-                               timeout=12, retries=2, breaker_threshold=12,
-                               breaker_cooldown=90),
+    # NSE JSON API (cookie session, aggressive anti-bot).  Tier-2 floods this
+    # host with ~400 option-chain calls at once: 6 slots + 100ms pacing gives
+    # ~10 req/s, and the 120s queue_timeout lets workers wait politely instead
+    # of being counted as rejected.  Threshold 15 tolerates a cookie-expiry
+    # burst while the re-warm kicks in.
+    "nse":          HostPolicy("nse", max_concurrent=6, min_interval=0.10,
+                               timeout=12, retries=2, breaker_threshold=15,
+                               breaker_cooldown=60, queue_timeout=120),
     # NSE static archives (bhavcopy, EQUITY_L.csv, fo_mktlots.csv)
     "nse_archives": HostPolicy("nse_archives", max_concurrent=2, timeout=20,
                                retries=2, breaker_threshold=6),
@@ -236,10 +241,11 @@ class FetchEngine:
         attempts = (policy.retries if retries is None else retries) + 1
         self._check_breaker(state)
 
-        if not state.semaphore.acquire(timeout=max(policy.timeout * 2, 30)):
+        queue_timeout = policy.queue_timeout or max(policy.timeout * 2, 30)
+        if not state.semaphore.acquire(timeout=queue_timeout):
             with state.lock:
                 state.rejected += 1
-            raise TimeoutError(f"{host}: no free slot after {max(policy.timeout * 2, 30):.0f}s")
+            raise TimeoutError(f"{host}: no free slot after {queue_timeout:.0f}s")
         try:
             last_exc: Exception | None = None
             for attempt in range(attempts):
