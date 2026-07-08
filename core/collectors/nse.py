@@ -77,20 +77,42 @@ NSE_INDEX_MAP = {
 }
 
 
-def _make_session() -> requests.Session:
-    session = requests.Session()
-    headers = {
-        "User-Agent":      _UA,
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept":          "*/*",
-        "Referer":         _NSE_BASE + "/",
-    }
-    session.headers.update(headers)
+def _make_session():
+    """
+    Build a warmed-up NSE session.
+
+    NSE fronts its API with Akamai bot-manager, which fingerprints the TLS
+    handshake itself — plain `requests` gets a cookieless 403 regardless of
+    headers.  `curl_cffi` with Chrome impersonation passes, so it is the
+    primary path (it ships as a yfinance dependency); plain requests remains
+    as a last-resort fallback.  Warm-up is two-step: the homepage sets the
+    Akamai cookies, the live-equity-market page arms the API gate.
+    """
+    session = None
     try:
-        session.get(_NSE_BASE, timeout=12)
-        time.sleep(0.5)
+        from curl_cffi import requests as cffi_requests
+        session = cffi_requests.Session(impersonate="chrome")
+    except Exception as e:
+        log.warning("curl_cffi unavailable (%s) — NSE API will likely 403", e)
+        session = requests.Session()
+        session.headers.update({"User-Agent": _UA})
+
+    try:
+        r = session.get(_NSE_BASE, timeout=12)
+        time.sleep(0.4)
+        session.get(_NSE_BASE + "/market-data/live-equity-market", timeout=12)
+        time.sleep(0.4)
+        if getattr(r, "status_code", None) != 200:
+            log.warning("NSE warm-up homepage returned %s", getattr(r, "status_code", "?"))
     except Exception as e:
         log.warning("NSE session warm-up failed: %s", e)
+
+    session.headers.update({
+        "Accept":           "application/json, text/plain, */*",
+        "Accept-Language":  "en-US,en;q=0.9",
+        "Referer":          _NSE_BASE + "/market-data/live-equity-market",
+        "X-Requested-With": "XMLHttpRequest",
+    })
     return session
 
 
@@ -150,7 +172,9 @@ def _publish(topic: str, data: dict):
 
 def fetch_index_quotes(session: requests.Session, index_name: str) -> list[dict]:
     """Fetch all constituents + live quote for a given NSE index."""
-    data = _nse_get(session, "equity-stockIndices", {"index": index_name})
+    # NSE renamed this endpoint (equity-stockIndices -> equity-stock-indices)
+    # around mid-2026; the old name now returns an HTML 404.
+    data = _nse_get(session, "equity-stock-indices", {"index": index_name})
     if not data:
         return []
     return data.get("data", [])
@@ -323,28 +347,55 @@ def save_fii_dii_to_lake(record: dict):
 
 # ── 4. Option Chain ───────────────────────────────────────────────────────────
 
+_OPTION_INDICES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"}
+
+# Nearest-expiry cache: contract-info costs one extra NSE call per symbol,
+# and expiries only change daily.
+_expiry_cache: dict[str, tuple[str, str]] = {}   # symbol -> (date_iso, expiry)
+_expiry_lock = threading.Lock()
+
+
+def _nearest_expiry(symbol: str, session) -> Optional[str]:
+    today = date.today().isoformat()
+    with _expiry_lock:
+        cached = _expiry_cache.get(symbol)
+        if cached and cached[0] == today:
+            return cached[1]
+    info = _nse_get(session, "option-chain-contract-info", {"symbol": symbol})
+    expiries = (info or {}).get("expiryDates") or []
+    if not expiries:
+        return None
+    with _expiry_lock:
+        _expiry_cache[symbol] = (today, expiries[0])
+    return expiries[0]
+
+
 def fetch_option_chain(symbol: str, session: requests.Session = None) -> Optional[dict]:
     """
-    Fetch full option chain for a symbol.
+    Fetch full option chain for a symbol via the option-chain-v3 API
+    (the old option-chain-equities endpoint returns empty since mid-2026).
     Returns summary: {pcr, max_pain_strike, total_ce_oi, total_pe_oi, atm_strike}
     """
     if session is None:
         session = _make_session()
 
-    endpoint = "option-chain-equities" if symbol != "NIFTY" else "option-chain-indices"
-    data = _nse_get(session, endpoint, {"symbol": symbol})
+    nearest_expiry = _nearest_expiry(symbol, session)
+    if not nearest_expiry:
+        return None
+
+    oc_type = "Indices" if symbol in _OPTION_INDICES else "Equity"
+    data = _nse_get(
+        session, "option-chain-v3",
+        {"type": oc_type, "symbol": symbol, "expiry": nearest_expiry},
+    )
     if not data:
         return None
 
-    records   = data.get("records", {}).get("data", [])
-    spot      = data.get("records", {}).get("underlyingValue")
-    expiries  = data.get("records", {}).get("expiryDates", [])
-    if not records or not expiries:
+    # v3 returns rows for the requested expiry only
+    rows = data.get("records", {}).get("data", [])
+    spot = data.get("records", {}).get("underlyingValue")
+    if not rows:
         return None
-
-    # Use nearest expiry
-    nearest_expiry = expiries[0]
-    rows = [r for r in records if r.get("expiryDate") == nearest_expiry]
 
     total_ce_oi = sum(r.get("CE", {}).get("openInterest", 0) or 0 for r in rows)
     total_pe_oi = sum(r.get("PE", {}).get("openInterest", 0) or 0 for r in rows)
