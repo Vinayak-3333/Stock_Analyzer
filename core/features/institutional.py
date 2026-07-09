@@ -281,6 +281,12 @@ def compute_institutional_features(
         * **oi_buildup_bullish** — True if rising OI + rising price
     """
 
+    # Callers pass Yahoo-style symbols ('RELIANCE.NS'); everything below —
+    # lake delivery lookups, NSE option-chain endpoints — speaks bare NSE
+    # symbols.  Passing the suffixed form through meant zero delivery rows
+    # matched and every option-chain call 404'd.
+    symbol = symbol.replace(".NS", "").strip().upper()
+
     session = _get_session(nse_session)
 
     # -- Safe defaults (returned on any failure) ----------------------------
