@@ -213,12 +213,14 @@ IST = pytz.timezone("Asia/Kolkata")
 scheduler = BackgroundScheduler(timezone=IST)
 
 # 09:15 IST and 15:30 IST, Mon–Fri.  coalesce + misfire_grace_time let a
-# delayed job (e.g. the previous run overran) still fire once instead of
-# being dropped silently.
+# delayed job still fire once instead of being dropped silently.  Grace is
+# 4h because this backend runs on a laptop that sleeps: waking at 11:00
+# should still produce the morning run (live market data is still useful),
+# not silently skip to 15:30.
 scheduler.add_job(analysis_job, CronTrigger(day_of_week="mon-fri", hour=9,  minute=15, timezone=IST),
-                  coalesce=True, misfire_grace_time=3600, max_instances=1)
+                  coalesce=True, misfire_grace_time=14400, max_instances=1)
 scheduler.add_job(analysis_job, CronTrigger(day_of_week="mon-fri", hour=15, minute=30, timezone=IST),
-                  coalesce=True, misfire_grace_time=3600, max_instances=1)
+                  coalesce=True, misfire_grace_time=14400, max_instances=1)
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
 app = FastAPI(title="StockRadar IN API", version="2.0")
@@ -247,6 +249,34 @@ def on_startup():
     init_db()
     scheduler.start()
     log.info("Scheduler started — jobs: %s", [str(j) for j in scheduler.get_jobs()])
+
+
+@app.on_event("startup")
+async def start_scheduler_nudge():
+    """
+    Keep APScheduler honest across system sleeps.
+
+    Windows kernel waits don't elapse while the machine is suspended, so
+    APScheduler's timer thread can sit frozen for days after a wake — jobs
+    show a next_run in the past and never fire (observed 9–11 Jul 2026).
+    scheduler.wakeup() interrupts that wait and forces the queue to be
+    re-evaluated; this task fires it every 60s, so within a minute of any
+    resume the scheduler either runs an overdue job (inside its misfire
+    grace) or reschedules it properly.
+    """
+    import asyncio
+
+    async def _nudge_loop():
+        while True:
+            await asyncio.sleep(60)
+            try:
+                if scheduler.running:
+                    scheduler.wakeup()
+            except Exception as exc:
+                log.debug("Scheduler nudge failed: %s", exc)
+
+    asyncio.get_running_loop().create_task(_nudge_loop())
+    log.info("Scheduler sleep-wake nudge task started (60s interval)")
 
 
 @app.on_event("shutdown")
