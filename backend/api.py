@@ -41,7 +41,7 @@ try:
 except Exception as _e:
     pass
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -57,8 +57,8 @@ from core.pipeline import get_modular_market_conditions, run_modular_analysis
 from core.lake.manager import close_lake
 from core.events.store import get_event_stats, get_recent_events
 
-# OIDC auth (Phase 1): imports cleanly even without Google credentials set.
-from auth import install_auth, OIDC_ENABLED
+# OIDC auth (Phase 1/2): imports cleanly even without Google credentials set.
+from auth import install_auth, require_user, OIDC_ENABLED
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -228,11 +228,17 @@ scheduler.add_job(analysis_job, CronTrigger(day_of_week="mon-fri", hour=15, minu
 # ── FastAPI app ────────────────────────────────────────────────────────────────
 app = FastAPI(title="StockRadar IN API", version="2.0")
 
+# CORS (SR-2): explicit origin allow-list + credentials so the browser will
+# send/accept the session cookie. A "*" origin is illegal with credentials.
+# Configure prod origins via CORS_ALLOW_ORIGINS (comma-separated).
+_cors_raw   = os.environ.get("CORS_ALLOW_ORIGINS") or os.environ.get("FRONTEND_URL", "http://localhost:5173")
+CORS_ORIGINS = [o.strip().rstrip("/") for o in _cors_raw.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-CSRF-Token", "Authorization"],
 )
 
 # ── Auth (Phase 1) ──────────────────────────────────────────────────────────────
@@ -296,8 +302,19 @@ def on_shutdown():
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+# Phase 2: every /api/* route below requires a valid session via
+# Depends(require_user) — EXCEPT /api/health, which stays public so the Docker
+# healthchecks (docker-compose.nas.yml, Dockerfile.backend) can probe it
+# unauthenticated. /auth/* routes are mounted separately and are intentionally
+# public (they ARE the login path).
 
-@app.get("/api/status")
+@app.get("/api/health")
+def health():
+    """Public, unauthenticated liveness probe. Used by Docker healthchecks."""
+    return {"status": "ok"}
+
+
+@app.get("/api/status", dependencies=[Depends(require_user)])
 def status():
     """Scheduler status, running flag, next scheduled runs."""
     jobs = []
@@ -319,7 +336,7 @@ def status():
     }
 
 
-@app.get("/api/latest")
+@app.get("/api/latest", dependencies=[Depends(require_user)])
 def latest():
     """Most recent analysis run with full stock results."""
     with get_db() as conn:
@@ -335,7 +352,7 @@ def latest():
     return JSONResponse(payload)
 
 
-@app.get("/api/history")
+@app.get("/api/history", dependencies=[Depends(require_user)])
 def history(limit: int = 20):
     """List of past runs (without full results for performance)."""
     with get_db() as conn:
@@ -348,7 +365,7 @@ def history(limit: int = 20):
     return JSONResponse(sanitize_floats([dict(r) for r in rows]))
 
 
-@app.get("/api/runs/{run_id}")
+@app.get("/api/runs/{run_id}", dependencies=[Depends(require_user)])
 def get_run(run_id: int):
     """Full results for a specific historical run."""
     with get_db() as conn:
@@ -361,7 +378,7 @@ def get_run(run_id: int):
     return JSONResponse(sanitize_floats(d))
 
 
-@app.post("/api/trigger")
+@app.post("/api/trigger", dependencies=[Depends(require_user)])
 def trigger(background_tasks: BackgroundTasks, email: bool = True):
     """Manually trigger analysis (runs in background)."""
     if _run_is_active():
@@ -370,7 +387,7 @@ def trigger(background_tasks: BackgroundTasks, email: bool = True):
     return {"status": "triggered", "message": "Analysis started in background"}
 
 
-@app.get("/api/market")
+@app.get("/api/market", dependencies=[Depends(require_user)])
 def market():
     """Live market conditions (fetched fresh on demand)."""
     try:
@@ -380,13 +397,13 @@ def market():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/events")
+@app.get("/api/events", dependencies=[Depends(require_user)])
 def events(limit: int = 100, stage: Optional[str] = None, symbol: Optional[str] = None):
     """Recent event-driven pipeline events."""
     return JSONResponse(sanitize_floats(get_recent_events(limit=limit, stage=stage, symbol=symbol)))
 
 
-@app.get("/api/factor-ic")
+@app.get("/api/factor-ic", dependencies=[Depends(require_user)])
 def factor_ic(days: int = 90):
     """
     Factor information-coefficient report: how well each scoring factor
@@ -401,14 +418,14 @@ def factor_ic(days: int = 90):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/fetch-stats")
+@app.get("/api/fetch-stats", dependencies=[Depends(require_user)])
 def fetch_stats():
     """Per-host fetch-engine metrics: calls, errors, retries, breaker state."""
     from core.fetch import get_engine
     return JSONResponse(sanitize_floats(get_engine().stats()))
 
 
-@app.get("/api/events/status")
+@app.get("/api/events/status", dependencies=[Depends(require_user)])
 def events_status():
     """Event bus/lake health and per-stage counts."""
     stats = get_event_stats()

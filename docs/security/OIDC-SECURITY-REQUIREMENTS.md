@@ -138,3 +138,23 @@ Audited on the `alt-approach` branch against `backend/api.py`,
 
 Multi-tenant data isolation, per-record ACLs, edge WAF/DDoS, SSO across other
 apps, hardware MFA enrollment (delegated to the IdP).
+
+## 10. Progress log
+
+- **Phase 1 — DONE** (commit `1e20fee`). Google OIDC Auth Code + PKCE, BFF
+  session cookie, ID-token validation, email allow-list. Verified live end to
+  end: `/auth/login → Google → /auth/callback → /auth/me` returns identity;
+  server log shows `Login OK: <email>`.
+- **Phase 2 — DONE** (this commit). `require_user` attached to all 10 `/api/*`
+  routes; added public `/api/health` and repointed both Docker healthchecks
+  (`Dockerfile.backend`, `docker-compose.nas.yml`) to it. CORS locked to an
+  explicit origin allow-list (`CORS_ALLOW_ORIGINS`, default
+  `http://localhost:5173`) with `allow_credentials=True`. Verified: protected
+  routes return 401 unauthenticated; `/api/health` stays 200.
+  - **Sequencing change:** CSRF (SR-3) **moved from Phase 2 to Phase 3.** The
+    double-submit token requires the SPA to echo it on state-changing calls, so
+    it belongs with the frontend work. Interim protection: the session cookie is
+    `SameSite=Lax`, which blocks cross-site POSTs. Revisit if we switch to
+    `SameSite=None` for a cross-origin Vercel topology.
+  - **Known interim effect:** the existing dashboard's `/api/*` calls now 401
+    until Phase 3 wires credentials + login UI. Expected.
