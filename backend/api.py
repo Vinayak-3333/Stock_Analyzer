@@ -57,6 +57,9 @@ from core.pipeline import get_modular_market_conditions, run_modular_analysis
 from core.lake.manager import close_lake
 from core.events.store import get_event_stats, get_recent_events
 
+# OIDC auth (Phase 1): imports cleanly even without Google credentials set.
+from auth import install_auth, OIDC_ENABLED
+
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("stockradar")
@@ -231,6 +234,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Auth (Phase 1) ──────────────────────────────────────────────────────────────
+# Adds the signed-cookie SessionMiddleware and mounts /auth/{login,callback,
+# logout,me}. Does NOT protect /api/* yet — that is Phase 2. CORS lockdown for
+# credentialed requests (SR-2) is also Phase 2.
+install_auth(app)
+log.info("Auth wired (OIDC enabled: %s)", OIDC_ENABLED)
 
 # Force no-cache on every API response — prevents browser from serving stale stock data
 class NoCacheMiddleware(BaseHTTPMiddleware):
