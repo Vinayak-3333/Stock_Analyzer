@@ -1,8 +1,13 @@
 # OIDC Integration & Security Hardening — Requirements
 
-> Branch: `alt-approach`. Status: **requirements / planning** (no code changes yet).
-> Author note: this is the design doc we execute step by step. Nothing here is
-> merged to `master` until the approach is validated on this branch.
+> Branch: `alt-approach`. Status: **complete for the current topology**
+> (2026-10-24). Phases 1–4 done and verified against a real Google login;
+> Phase 5 config done with secret rotation outstanding; Phase 6 (merge to
+> `master`) deliberately deferred until a production backend exists — see the
+> progress log for the reasoning and the checklist to resume.
+>
+> This is the design doc we execute step by step. Section 10 is the running
+> record; read it before changing anything here.
 
 ---
 
@@ -277,6 +282,52 @@ apps, hardware MFA enrollment (delegated to the IdP).
     checked live in Chrome: dashboard still loads through the reordered stack
     with no CSP violations, `/docs` renders for an authenticated user and 401s
     for anyone else.
+
+- **Phase 5 — PARTIALLY DONE** (config shipped; secret rotation still open).
+  Three things that would have broken auth anywhere but the dev box:
+  - **nginx never proxied `/auth/`.** The OIDC endpoints live at the backend
+    root, not under `/api`, so on the NAS they fell through to the SPA fallback
+    and returned `index.html` with a **200**. Worse than failing: the dashboard
+    would have read that as a successful `/auth/me` and treated an HTML page as
+    an identity. Fixed in `frontend/nginx.nas.conf`.
+  - **`docker-compose.nas.yml` passed no OIDC/session/hardening env**, so the
+    container would have booted with auth disabled — `/auth/*` 503, every
+    `/api/*` 401, no way in. Added, with `TRUST_PROXY_HEADERS` defaulting to
+    `true` there since requests arrive via the nginx container.
+  - **`api.py` backfilled missing keys from `.env.nas.example`** — a gitignored
+    file holding real credentials, i.e. an "example" file silently supplying
+    production config. Removed; everything it provided already had an identical
+    code default, so the change is behaviour-neutral. `.env` is now the single
+    source, documented by a committable `.env.example`.
+  - **Still open (yours):** rotate the Gmail app password. The four market-data
+    keys no longer need rotating — the dead-code sweep deleted the provider
+    chain, so they are provably unused and can simply be revoked.
+- **Phase 6 — DEFERRED BY DECISION, not forgotten** (2026-10-24). The merge to
+  `master` is deliberately **not** being done, because there is no production
+  backend: everything runs on the laptop, and the NAS/Vercel deployments are
+  aspirational. Merging would flip the deployed Vercel dashboard from "works,
+  unauthenticated" to "login screen that can never complete", since no
+  reachable backend is configured for OIDC. That trades a working dashboard for
+  no security gain.
+  - **`master` therefore remains unauthenticated by choice.** It is a public
+    repo serving a dashboard with no secrets in the payload; the exposure is
+    the analysis output, not credentials.
+  - **Do this when real infrastructure exists** (in order):
+    1. Stand up a reachable backend; note its public origin.
+    2. Google Cloud Console → Credentials → add that origin's
+       `/auth/callback` as an Authorized redirect URI. One per environment;
+       it must match scheme, host, port and path exactly.
+    3. Set on the backend: `OIDC_REDIRECT_URI`, `FRONTEND_URL`,
+       `CORS_ALLOW_ORIGINS` (the Vercel origin), and a stable `SESSION_SECRET`.
+    4. If the SPA and API are on different sites (Vercel → separate backend
+       domain), set `SESSION_COOKIE_SAMESITE=none` **and**
+       `SESSION_COOKIE_SECURE=true`. `none` without `Secure` is rejected by
+       every modern browser. Behind the NAS nginx it is same-origin, so `lax`
+       is correct and no change is needed.
+    5. Turn on `SECURITY_HSTS_ENABLED` wherever TLS terminates.
+    6. Set `VITE_API_URL` for the Vercel build, then merge and deploy.
+    7. Re-run `backend/_verify_security.py` against the deployed host and
+       confirm a real Google login end to end before announcing it done.
 
 ### New environment variables (Phase 4)
 
