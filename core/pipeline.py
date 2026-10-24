@@ -371,20 +371,37 @@ def _store_ohlcv(symbol: str, df: pd.DataFrame) -> None:
         log.debug("OHLCV lake write failed for %s: %s", symbol, exc)
 
 
+# compute_regime_features() labels the regime BULL / NEUTRAL / BEAR; the runs
+# table, the email template and the dashboard badges all speak
+# BULLISH / NEUTRAL / BEARISH.
+_TREND_LABELS = {"BULL": "BULLISH", "BEAR": "BEARISH", "NEUTRAL": "NEUTRAL"}
+
+
 def _market_payload(regime: dict | None) -> dict:
-    regime = regime or {}
-    label = regime.get("regime_label") or regime.get("market_regime") or "NEUTRAL"
+    if not regime:
+        # Regime features are the only source for the dashboard's market pulse;
+        # losing them silently is what kept the panel blank for months.
+        log.warning("Regime features unavailable — market payload will be empty")
+        regime = {}
+
+    label = str(regime.get("market_regime") or "NEUTRAL").upper()
+    vix = _clean_number(regime.get("vix_value"))
+    nifty_1d = _clean_number(regime.get("nifty_change_1d"), 0)
+    if vix is None:
+        log.warning("Regime features carry no India VIX — regime panel will show '—'")
+
     return {
-        "market_trend": str(label).upper(),
-        "vix_value": _clean_number(regime.get("india_vix")),
-        "nifty_50_change": _clean_number(regime.get("nifty_change_1d"), 0),
+        "market_trend": _TREND_LABELS.get(label, label),
+        # yfinance hands back float32-widened values (16.860000610351562)
+        "vix_value": round(vix, 2) if vix is not None else None,
+        "nifty_50_change": nifty_1d,
         "sector_changes": regime.get("sector_breadth") or {},
         "regime": regime,
     }
 
 
 def _regime_code(regime: dict | None) -> int:
-    label = str((regime or {}).get("regime_label") or (regime or {}).get("market_regime") or "").upper()
+    label = str((regime or {}).get("market_regime") or "").upper()
     if "BULL" in label:
         return 2
     if "BEAR" in label:

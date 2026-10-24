@@ -166,6 +166,7 @@ def compute_regime_features() -> Dict[str, Any]:
     ============================  ========================================
     market_regime                 ``'BULL'`` | ``'NEUTRAL'`` | ``'BEAR'``
     regime_score                  ``2`` (bull) / ``1`` (neutral) / ``0`` (bear)
+    nifty_change_1d               NIFTY 50 1-day % change (close over close)
     nifty_5d_change               NIFTY 50 5-day % change
     nifty_20d_change              NIFTY 50 20-day % change
     nifty_above_200sma            *bool* — Close > 200-SMA
@@ -199,6 +200,7 @@ def compute_regime_features() -> Dict[str, Any]:
     tnx_df = _safe_download("^TNX", period="1mo")
 
     # --- NIFTY 50 ----------------------------------------------------------
+    nifty_1d = _pct_change_n(nifty_df, 1)
     nifty_5d = _pct_change_n(nifty_df, 5)
     nifty_20d = _pct_change_n(nifty_df, 20)
     nifty_above_200 = _is_above_sma(nifty_df, 200)
@@ -276,6 +278,7 @@ def compute_regime_features() -> Dict[str, Any]:
     features: Dict[str, Any] = {
         "market_regime": market_regime,
         "regime_score": regime_score,
+        "nifty_change_1d": nifty_1d,
         "nifty_5d_change": nifty_5d,
         "nifty_20d_change": nifty_20d,
         "nifty_above_200sma": nifty_above_200,

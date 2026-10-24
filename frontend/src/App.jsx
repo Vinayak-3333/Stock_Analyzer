@@ -153,7 +153,7 @@ function RegimePanel({ run }) {
       </div>
       <div className="regime-stats">
         <div className="regime-stat">
-          <div className="rs-label">NIFTY 50 · 5d</div>
+          <div className="rs-label">NIFTY 50 · 1d</div>
           <div className={`rs-value ${trendColor(run.nifty_change)}`}>{fmtPct(run.nifty_change)}</div>
         </div>
         <div className="regime-stat">
