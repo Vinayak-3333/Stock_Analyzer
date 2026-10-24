@@ -59,6 +59,15 @@ from core.events.store import get_event_stats, get_recent_events
 
 # OIDC auth (Phase 1/2): imports cleanly even without Google credentials set.
 from auth import install_auth, require_csrf, require_user, OIDC_ENABLED
+# Hardening (Phase 4): security headers, rate limiting, /docs lockdown.
+from security import (
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+    TRUST_PROXY_HEADERS,
+    install_docs,
+    security_summary,
+)
+from audit import audit, client_ip
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -226,11 +235,54 @@ scheduler.add_job(analysis_job, CronTrigger(day_of_week="mon-fri", hour=15, minu
                   coalesce=True, misfire_grace_time=14400, max_instances=1)
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
-app = FastAPI(title="StockRadar IN API", version="2.0")
+# docs_url/redoc_url/openapi_url are disabled here and re-served by
+# security.install_docs() behind require_user (SR-8).
+app = FastAPI(
+    title="StockRadar IN API", version="2.0",
+    docs_url=None, redoc_url=None, openapi_url=None,
+)
 
-# CORS (SR-2): explicit origin allow-list + credentials so the browser will
-# send/accept the session cookie. A "*" origin is illegal with credentials.
-# Configure prod origins via CORS_ALLOW_ORIGINS (comma-separated).
+# Force no-cache on every API response — prevents browser from serving stale stock data
+class NoCacheMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: StarletteRequest, call_next):
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"]         = "no-cache"
+        response.headers["Expires"]        = "0"
+        return response
+
+
+# ── Middleware stack ───────────────────────────────────────────────────────────
+# Starlette runs the LAST-added middleware outermost, so the order below is
+# deliberate and reads bottom-up. The resulting chain is:
+#
+#     CORS → SecurityHeaders → NoCache → Session → RateLimit → routes
+#
+# Two constraints drive it:
+#   • RateLimit must be INSIDE Session — it reads request.session to give a
+#     logged-in user their own budget instead of sharing one per IP.
+#   • CORS must be OUTERMOST so a 401/403/429 raised by an inner middleware
+#     still carries CORS headers. Before Phase 4 CORS was added first (making
+#     it innermost), which meant any such error reached the browser as an
+#     opaque "Network Error" with the real status invisible.
+
+# 1. innermost — rate limiting (SR-6), plus the authenticated /docs routes (SR-8)
+app.add_middleware(RateLimitMiddleware)
+install_docs(app)
+
+# 2. session cookie + /auth/{login,callback,logout,me}
+install_auth(app)
+log.info("Auth wired (OIDC enabled: %s)", OIDC_ENABLED)
+
+# 3. cache suppression
+app.add_middleware(NoCacheMiddleware)
+
+# 4. security response headers (SR-4)
+app.add_middleware(SecurityHeadersMiddleware)
+
+# 5. outermost — CORS (SR-2): explicit origin allow-list + credentials so the
+# browser will send/accept the session cookie. A "*" origin is illegal with
+# credentials. Configure prod origins via CORS_ALLOW_ORIGINS (comma-separated).
 _cors_raw   = os.environ.get("CORS_ALLOW_ORIGINS") or os.environ.get("FRONTEND_URL", "http://localhost:5173")
 CORS_ORIGINS = [o.strip().rstrip("/") for o in _cors_raw.split(",") if o.strip()]
 app.add_middleware(
@@ -244,23 +296,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-CSRF-Token", "Authorization", "Cache-Control"],
 )
 
-# ── Auth (Phase 1) ──────────────────────────────────────────────────────────────
-# Adds the signed-cookie SessionMiddleware and mounts /auth/{login,callback,
-# logout,me}. Does NOT protect /api/* yet — that is Phase 2. CORS lockdown for
-# credentialed requests (SR-2) is also Phase 2.
-install_auth(app)
-log.info("Auth wired (OIDC enabled: %s)", OIDC_ENABLED)
-
-# Force no-cache on every API response — prevents browser from serving stale stock data
-class NoCacheMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: StarletteRequest, call_next):
-        response = await call_next(request)
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-        response.headers["Pragma"]         = "no-cache"
-        response.headers["Expires"]        = "0"
-        return response
-
-app.add_middleware(NoCacheMiddleware)
+log.info("Security posture: %s", security_summary())
 
 
 @app.on_event("startup")
@@ -383,11 +419,24 @@ def get_run(run_id: int):
     return JSONResponse(sanitize_floats(d))
 
 
+# Dependency order matters: require_user must come first so an anonymous caller
+# gets 401 (which the SPA turns into a login redirect) rather than a misleading
+# 403 about a CSRF token they were never going to have.
 @app.post("/api/trigger", dependencies=[Depends(require_user), Depends(require_csrf)])
-def trigger(background_tasks: BackgroundTasks, email: bool = True):
-    """Manually trigger analysis (runs in background)."""
+def trigger(request: StarletteRequest, background_tasks: BackgroundTasks, email: bool = True):
+    """Manually trigger analysis (runs in background).
+
+    The privileged endpoint (SR-1): it burns Yahoo/NSE quota and sends mail, so
+    every call is audited with the identity behind it (SR-9).
+    """
+    who = (request.session.get("user") or {}).get("email")
+    ip  = client_ip(request, TRUST_PROXY_HEADERS)
+
     if _run_is_active():
+        audit("trigger.rejected", identity=who, ip=ip, reason="already_running")
         return {"status": "already_running", "message": "Analysis already in progress"}
+
+    audit("trigger.accepted", identity=who, ip=ip, email=email)
     background_tasks.add_task(analysis_job, send_email=email)
     return {"status": "triggered", "message": "Analysis started in background"}
 

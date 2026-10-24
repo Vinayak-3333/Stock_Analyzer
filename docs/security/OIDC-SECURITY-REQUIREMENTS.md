@@ -124,6 +124,10 @@ Audited on the `alt-approach` branch against `backend/api.py`,
    `/docs` lockdown (SR-8), audit logging (SR-9).
 6. **Phase 5 — Secrets & deploy.** Rotate existing secrets, sync worktree
    `.env`s, verify TLS + cookie flags in the NAS/Vercel topology, document.
+   *Carried in from Phase 4:* turn on `SECURITY_HSTS_ENABLED`, and behind the
+   NAS nginx set `TRUST_PROXY_HEADERS=true` — in that topology the rate limiter
+   otherwise sees the proxy's IP for every unauthenticated caller, collapsing
+   them into a single shared bucket.
 7. **Phase 6 — Validate & merge.** End-to-end test on `alt-approach`; then merge
    to `master`.
 
@@ -131,7 +135,9 @@ Audited on the `alt-approach` branch against `backend/api.py`,
 
 - `authlib` — OIDC/OAuth2 client, JWKS validation, PKCE.
 - `itsdangerous` — signed session cookies (or `starlette` `SessionMiddleware`).
-- `slowapi` (or equivalent) — rate limiting.
+- ~~`slowapi` (or equivalent) — rate limiting.~~ **Not taken.** Phase 4 ships a
+  ~90-line sliding-window limiter in `backend/security.py` instead; see the
+  Phase 4 progress-log entry for the reasoning.
 - Optional: `redis` (already present) for server-side sessions.
 
 ## 9. Out of scope (v1)
@@ -211,3 +217,78 @@ apps, hardware MFA enrollment (delegated to the IdP).
     logout is *soft* revocation — a copy of the cookie taken before logout
     stays valid until `SESSION_MAX_AGE` (8h). Bounding that further needs a
     server-side revocation store; out of scope for v1.
+- **Phase 4 — DONE** (this commit). Hardening. Two new modules:
+  `backend/audit.py` (no dependencies, so both auth.py and security.py can use
+  it without a cycle) and `backend/security.py`.
+  - **SR-4 security headers** — `SecurityHeadersMiddleware` sets
+    `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+    `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`,
+    a `Permissions-Policy` denying geolocation/mic/camera, and a CSP. The API
+    serves JSON so it gets the strictest possible policy (`default-src 'none'`);
+    the `/docs` routes get a looser one allowing the jsDelivr Swagger bundle.
+    HSTS is **opt-in** via `SECURITY_HSTS_ENABLED` — it is ignored over plain
+    http and would only be noise on a localhost dev box, so it belongs wherever
+    TLS actually terminates.
+  - **SR-6 rate limiting** — sliding-window limiter keyed by session identity
+    when there is one, else client IP, so a logged-in user gets their own
+    budget rather than sharing one per NAT. Rules are path-prefix based,
+    longest match wins: `/api/trigger` 5/hour (a run is minutes of CPU, Yahoo
+    and NSE quota, and an email), `/auth/*` 20/min, `/api/*` 240/min —
+    comfortably above the dashboard's 6 req/min idle and 36 req/min while a run
+    is in flight. `/api/health` is exempt so Docker healthchecks don't get
+    throttled. Returns 429 with `Retry-After`. All four numbers are env-tunable.
+    `X-Forwarded-For` is only honoured when `TRUST_PROXY_HEADERS` is set —
+    otherwise anyone could forge their way past a per-IP limit.
+    - **Not slowapi, deliberately.** The doc allowed "slowapi or equivalent".
+      PyPI was unreachable from the dev box at implementation time, but the
+      call stands on its own: this backend is a single uvicorn process, which
+      is exactly the regime where slowapi's default in-memory backend works and
+      no more, so the dependency would have bought nothing while forcing a NAS
+      image rebuild. Path-prefix rules also avoid decorating ten routes. If
+      this ever runs multiple workers, swap `_WINDOWS` for Redis (already a
+      dependency) behind the same middleware boundary.
+  - **SR-8 `/docs` lockdown** — FastAPI's built-in `docs_url`/`redoc_url`/
+    `openapi_url` are set to `None` and `/docs` + `/openapi.json` re-served
+    behind `require_user`. The schema is protected too: publishing the full
+    route list unauthenticated would undo most of the point. `DOCS_ENABLED=false`
+    removes them entirely.
+  - **SR-9 audit trail** — `stockradar.audit` logger writing to the console and
+    a rotating `backend/data/audit.log` (gitignored). Events: `login.ok`,
+    `login.failed`, `login.rejected`, `logout`, `trigger.accepted`,
+    `trigger.rejected`, `csrf.blocked`, `ratelimit.blocked`. Every line carries
+    `identity=` and `ip=`. The one to watch is `login.rejected` — it means
+    someone completed Google auth and came back with a real identity that is
+    not on the allow-list.
+  - **Bug fixed: middleware ordering.** CORS was added first, which made it
+    *innermost*, so any 401/403/429 raised by an outer middleware reached the
+    browser without CORS headers — an opaque "Network Error" with the real
+    status invisible. The chain is now explicit and ordered
+    `CORS → SecurityHeaders → NoCache → Session → RateLimit → routes`: the rate
+    limiter must sit inside Session to read the identity, and CORS must be
+    outermost so errors stay legible.
+  - **Bug fixed: 401 vs 403 on `/api/trigger`.** Moving `require_user` into the
+    handler signature made FastAPI evaluate the decorator-level `require_csrf`
+    first, so an anonymous caller got a misleading 403 about a CSRF token
+    instead of a 401 — which would also have stopped the SPA bouncing an
+    expired session to the login screen. Both are back in `dependencies=[]` in
+    the right order, and the verifier now asserts it.
+  - **Verified** by `backend/_verify_security.py` — 40/40. This replaces
+    `_verify_phase3.py` and now covers Phase 2, 3 and 4 in one script. Also
+    checked live in Chrome: dashboard still loads through the reordered stack
+    with no CSP violations, `/docs` renders for an authenticated user and 401s
+    for anyone else.
+
+### New environment variables (Phase 4)
+
+| Var | Default | Purpose |
+|---|---|---|
+| `SECURITY_HSTS_ENABLED` | `false` | Send HSTS. Turn on where TLS terminates. |
+| `SECURITY_HSTS_MAX_AGE` | `31536000` | HSTS max-age seconds. |
+| `TRUST_PROXY_HEADERS` | `false` | Honour `X-Forwarded-For`. **Only** behind a trusted proxy. |
+| `RATE_LIMIT_ENABLED` | `true` | Master switch for SR-6. |
+| `RATE_LIMIT_TRIGGER` | `5` | `/api/trigger` allowance per hour. |
+| `RATE_LIMIT_AUTH` | `20` | `/auth/*` allowance per minute. |
+| `RATE_LIMIT_API` | `240` | `/api/*` allowance per minute. |
+| `DOCS_ENABLED` | `true` | Serve `/docs` + `/openapi.json` to an authenticated user. |
+| `AUDIT_LOG_MAX_BYTES` | `5242880` | Audit log rotation size. |
+| `AUDIT_LOG_BACKUPS` | `5` | Rotated audit files kept. |

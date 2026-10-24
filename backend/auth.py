@@ -32,6 +32,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
+from audit import audit, client_ip
+
+# Only honour X-Forwarded-For when a trusted reverse proxy sets it; read here
+# rather than imported from security.py to keep this module cycle-free.
+_TRUST_PROXY = os.environ.get("TRUST_PROXY_HEADERS", "false").strip().lower() in ("1", "true", "yes")
+
 log = logging.getLogger("stockradar.auth")
 
 # ── Config (read once at import; .env is already loaded by api.py) ─────────────
@@ -163,10 +169,16 @@ async def require_csrf(request: Request) -> None:
     expected = request.session.get("csrf")
     supplied = request.headers.get(CSRF_HEADER_NAME, "")
     if not expected or not supplied or not secrets.compare_digest(str(expected), supplied):
+        reason = "absent" if not supplied else "mismatched"
         log.warning(
             "CSRF check failed for %s %s (header %s)",
-            request.method, request.url.path,
-            "absent" if not supplied else "mismatched",
+            request.method, request.url.path, reason,
+        )
+        user = request.session.get("user") or {}
+        audit(
+            "csrf.blocked", identity=user.get("email"),
+            ip=client_ip(request, _TRUST_PROXY),
+            path=request.url.path, reason=reason,
         )
         raise HTTPException(status_code=403, detail="CSRF token missing or invalid")
 
@@ -211,10 +223,13 @@ async def callback(request: Request):
     _require_oidc()
     from authlib.integrations.starlette_client import OAuthError
 
+    ip = client_ip(request, _TRUST_PROXY)
+
     try:
         token = await _oauth.google.authorize_access_token(request)
     except OAuthError as exc:
         log.warning("OIDC callback error: %s", exc)
+        audit("login.failed", ip=ip, reason="oauth_error")
         return RedirectResponse(f"{FRONTEND_URL}/?auth_error=oauth")
 
     # Authlib validates the id_token signature (JWKS) + nonce and parses claims.
@@ -224,15 +239,22 @@ async def callback(request: Request):
             userinfo = await _oauth.google.userinfo(token=token)
         except Exception as exc:  # pragma: no cover
             log.warning("Failed to fetch userinfo: %s", exc)
+            audit("login.failed", ip=ip, reason="userinfo_fetch")
             return RedirectResponse(f"{FRONTEND_URL}/?auth_error=userinfo")
 
     email          = (userinfo.get("email") or "").strip().lower()
     email_verified = bool(userinfo.get("email_verified"))
 
     if not email or not email_verified or email not in ALLOWED_EMAILS:
-        # Authenticated by Google but not authorized for this app.
+        # Authenticated by Google but not authorized for this app. This is the
+        # line to watch in the audit log — it means someone reached the IdP and
+        # came back with a real identity that isn't on the allow-list.
         request.session.clear()
         log.warning("Rejected login for unauthorized/unverified email: %r", email)
+        audit(
+            "login.rejected", identity=email or None, ip=ip,
+            reason="unverified" if (email and not email_verified) else "not_allowed",
+        )
         return RedirectResponse(f"{FRONTEND_URL}/?auth_error=unauthorized")
 
     request.session["user"] = {
@@ -247,6 +269,7 @@ async def callback(request: Request):
     token = get_csrf_token(request)
 
     log.info("Login OK: %s", email)
+    audit("login.ok", identity=email, ip=ip, provider="google")
     response = RedirectResponse(FRONTEND_URL)
     set_csrf_cookie(response, token)
     return response
@@ -255,6 +278,8 @@ async def callback(request: Request):
 @auth_router.post("/auth/logout", dependencies=[Depends(require_csrf)])
 async def logout(request: Request):
     """Clear the session (soft-revoke) and drop the CSRF cookie."""
+    user = request.session.get("user") or {}
+    audit("logout", identity=user.get("email"), ip=client_ip(request, _TRUST_PROXY))
     request.session.clear()
     response = JSONResponse({"status": "logged_out"})
     response.delete_cookie(CSRF_COOKIE_NAME, path="/")
