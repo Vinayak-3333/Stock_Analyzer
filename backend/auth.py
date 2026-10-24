@@ -1,6 +1,6 @@
 """
-StockRadar IN — OIDC Authentication (Phase 1)
-=============================================
+StockRadar IN — OIDC Authentication
+===================================
 Google OIDC (Authorization Code + PKCE) behind a Backend-for-Frontend (BFF)
 pattern:
 
@@ -10,14 +10,14 @@ pattern:
     identity in a signed, httpOnly session cookie (Starlette SessionMiddleware).
   • Endpoints (all unprefixed, NOT under /api): /auth/login, /auth/callback,
     /auth/logout, /auth/me.
+  • State-changing routes additionally require a CSRF token (`require_csrf`):
+    minted into the session at login, handed to the SPA via /auth/me and a
+    JS-readable cookie, echoed back in the X-CSRF-Token header.
 
 Config comes from the environment (loaded from .env by api.py before this
 module is imported). If OIDC_CLIENT_ID / OIDC_CLIENT_SECRET are absent the
 module still imports cleanly and the auth endpoints return 503 — so the backend
 keeps booting before Google credentials are set up.
-
-Phase 2 will apply `require_user` to the /api/* routes. This module deliberately
-does NOT protect any existing route yet.
 """
 
 from __future__ import annotations
@@ -28,8 +28,8 @@ import logging
 import secrets
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 log = logging.getLogger("stockradar.auth")
@@ -62,6 +62,10 @@ if not SESSION_SECRET:
 
 SESSION_COOKIE_NAME = os.environ.get("SESSION_COOKIE_NAME", "stockradar_session")
 SESSION_MAX_AGE     = int(os.environ.get("SESSION_MAX_AGE", "28800"))  # 8h
+# CSRF double-submit companion cookie. Deliberately NOT httpOnly — the SPA has
+# to read it to echo the value back in the X-CSRF-Token header.
+CSRF_COOKIE_NAME    = os.environ.get("CSRF_COOKIE_NAME", "stockradar_csrf")
+CSRF_HEADER_NAME    = "X-CSRF-Token"
 # 'lax' for same-origin (behind the NAS reverse proxy); 'none' for the
 # cross-origin Vercel topology (requires Secure=True).
 SESSION_COOKIE_SAMESITE = os.environ.get("SESSION_COOKIE_SAMESITE", "lax").lower()
@@ -118,15 +122,53 @@ def get_session_user(request: Request) -> Optional[dict]:
 
 
 async def require_user(request: Request) -> dict:
-    """FastAPI dependency — 401 unless there is a valid session.
-
-    Defined here for Phase 2, which will attach it to the /api/* routes. Not
-    wired to any route yet.
-    """
+    """FastAPI dependency — 401 unless there is a valid session."""
     user = get_session_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
     return user
+
+
+# ── CSRF (SR-3) ────────────────────────────────────────────────────────────────
+# Double-submit, hardened: the token lives in the signed session *and* in a
+# JS-readable cookie. Requests must echo it in the X-CSRF-Token header, and we
+# compare the header against the **session** copy. A cross-site attacker can
+# ride the ambient session cookie but cannot read the token out of our origin,
+# so they cannot produce the header.
+def get_csrf_token(request: Request) -> str:
+    """Return this session's CSRF token, minting one if it has none yet."""
+    token = request.session.get("csrf")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        request.session["csrf"] = token
+    return token
+
+
+def set_csrf_cookie(response, token: str) -> None:
+    """Attach the JS-readable CSRF cookie to *response*."""
+    response.set_cookie(
+        CSRF_COOKIE_NAME,
+        token,
+        max_age=SESSION_MAX_AGE,
+        httponly=False,            # the SPA must be able to read this
+        secure=SESSION_COOKIE_SECURE,
+        samesite=SESSION_COOKIE_SAMESITE,
+        path="/",
+    )
+
+
+async def require_csrf(request: Request) -> None:
+    """FastAPI dependency — 403 unless the X-CSRF-Token header matches the
+    token held in the session. Attach to every state-changing route."""
+    expected = request.session.get("csrf")
+    supplied = request.headers.get(CSRF_HEADER_NAME, "")
+    if not expected or not supplied or not secrets.compare_digest(str(expected), supplied):
+        log.warning(
+            "CSRF check failed for %s %s (header %s)",
+            request.method, request.url.path,
+            "absent" if not supplied else "mismatched",
+        )
+        raise HTTPException(status_code=403, detail="CSRF token missing or invalid")
 
 
 # ── App wiring ─────────────────────────────────────────────────────────────────
@@ -200,22 +242,37 @@ async def callback(request: Request):
         "picture": userinfo.get("picture"),
     }
     request.session["auth_at"] = int(time.time())
+    # Fresh CSRF token per login, so it rotates with the session.
+    request.session.pop("csrf", None)
+    token = get_csrf_token(request)
+
     log.info("Login OK: %s", email)
-    return RedirectResponse(FRONTEND_URL)
+    response = RedirectResponse(FRONTEND_URL)
+    set_csrf_cookie(response, token)
+    return response
 
 
-@auth_router.post("/auth/logout")
+@auth_router.post("/auth/logout", dependencies=[Depends(require_csrf)])
 async def logout(request: Request):
-    """Clear the session (soft-revoke). CSRF protection is added in Phase 2."""
+    """Clear the session (soft-revoke) and drop the CSRF cookie."""
     request.session.clear()
-    return {"status": "logged_out"}
+    response = JSONResponse({"status": "logged_out"})
+    response.delete_cookie(CSRF_COOKIE_NAME, path="/")
+    return response
 
 
 @auth_router.get("/auth/me")
 async def me(request: Request):
-    """Return the current identity, or 401 if not logged in. The SPA uses this
-    to decide whether to show the dashboard or the login screen."""
+    """Return the current identity plus the session's CSRF token, or 401 if not
+    logged in. The SPA uses this to decide whether to show the dashboard or the
+    login screen, and to seed its X-CSRF-Token header."""
     user = get_session_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    return user
+
+    # Re-issue the cookie alongside the body so a session that predates the
+    # CSRF work (or one whose cookie was dropped) heals on the next poll.
+    token = get_csrf_token(request)
+    response = JSONResponse({**user, "csrf": token})
+    set_csrf_cookie(response, token)
+    return response

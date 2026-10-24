@@ -7,10 +7,32 @@ import {
 } from 'recharts'
 import {
   TrendingUp, TrendingDown, Zap, RefreshCw, Clock,
-  X, ChevronUp, ChevronDown, AlertTriangle, Search,
+  X, ChevronUp, ChevronDown, AlertTriangle, Search, LogOut,
 } from 'lucide-react'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
+// /auth/* lives at the backend root, not under /api. Strip the suffix so this
+// works for both topologies: a full cross-origin URL (Vercel) and a bare '/api'
+// proxied same-origin by nginx, which collapses to '' → '/auth/...'.
+const AUTH = API.replace(/\/api\/?$/, '')
+
+// Every call is credentialed: the BFF session lives in an httpOnly cookie, so
+// the browser only attaches it when withCredentials is set (and the backend's
+// CORS allow-list echoes allow_credentials).
+const api = axios.create({ withCredentials: true })
+
+// CSRF double-submit. The token comes from /auth/me and is echoed on every
+// state-changing request; GETs don't need it. Module-scoped so the interceptor
+// can reach it without threading state through the component tree.
+let csrfToken = null
+const SAFE_METHODS = new Set(['get', 'head', 'options'])
+api.interceptors.request.use(config => {
+  const method = (config.method || 'get').toLowerCase()
+  if (csrfToken && !SAFE_METHODS.has(method)) {
+    config.headers['X-CSRF-Token'] = csrfToken
+  }
+  return config
+})
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 const fmt = (n, d=2) => n != null ? Number(n).toFixed(d) : '—'
@@ -618,6 +640,70 @@ function ScoreDistChart({ results }) {
   )
 }
 
+// ── Auth screens ─────────────────────────────────────────────────────────────
+const AUTH_ERRORS = {
+  oauth:        'Google sign-in did not complete. Please try again.',
+  userinfo:     'Could not read your Google profile. Please try again.',
+  unauthorized: 'That Google account is not authorized for this dashboard.',
+}
+
+const GoogleMark = () => (
+  <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+    <path fill="#4285F4" d="M45.1 24.5c0-1.6-.1-3.2-.4-4.7H24v8.9h11.8c-.5 2.7-2 5.1-4.4 6.6v5.5h7.1c4.2-3.8 6.6-9.5 6.6-16.3z"/>
+    <path fill="#34A853" d="M24 46c6 0 11-2 14.5-5.2l-7.1-5.5c-2 1.3-4.5 2.1-7.4 2.1-5.7 0-10.6-3.9-12.3-9.1H4.3v5.7C7.8 41.1 15.3 46 24 46z"/>
+    <path fill="#FBBC05" d="M11.7 28.3c-.4-1.3-.7-2.7-.7-4.3s.3-3 .7-4.3v-5.7H4.3A22 22 0 0 0 2 24c0 3.6.9 6.9 2.3 9.9l7.4-5.6z"/>
+    <path fill="#EA4335" d="M24 9.5c3.2 0 6.1 1.1 8.4 3.3l6.3-6.3C34.9 2.9 30 1 24 1 15.3 1 7.8 5.9 4.3 13.1l7.4 5.7c1.7-5.2 6.6-9.3 12.3-9.3z"/>
+  </svg>
+)
+
+function LoginScreen({ error }) {
+  const message = error ? (AUTH_ERRORS[error] || 'Sign-in failed. Please try again.') : null
+  return (
+    <div className="auth-screen">
+      <div className="auth-card">
+        <div className="auth-logo">📡</div>
+        <div className="auth-title">Stock<span>Radar</span> IN</div>
+        <div className="auth-sub">This dashboard is private. Sign in to continue.</div>
+        {message && (
+          <div className="auth-error"><AlertTriangle size={14}/> {message}</div>
+        )}
+        {/* A plain link, not fetch: /auth/login is a 302 to Google's consent
+            screen, which must happen as a top-level navigation. */}
+        <a className="auth-btn" href={`${AUTH}/auth/login`}>
+          <GoogleMark/> Sign in with Google
+        </a>
+      </div>
+    </div>
+  )
+}
+
+function AuthSplash() {
+  return (
+    <div className="auth-screen">
+      <div className="auth-card">
+        <div className="auth-logo" style={{animation:'spin 2s linear infinite'}}>📡</div>
+        <div className="auth-sub">Checking your session…</div>
+      </div>
+    </div>
+  )
+}
+
+function BackendDownScreen({ onRetry }) {
+  return (
+    <div className="auth-screen">
+      <div className="auth-card">
+        <div className="auth-logo">🔌</div>
+        <div className="auth-title">Backend offline</div>
+        <div className="auth-sub">Could not reach the API to check your session.</div>
+        <code className="auth-code">
+          cd backend &amp;&amp; python -m uvicorn api:app --host 0.0.0.0 --port 8000
+        </code>
+        <button className="auth-btn" onClick={onRetry}><RefreshCw size={15}/> Retry</button>
+      </div>
+    </div>
+  )
+}
+
 // ── App ────────────────────────────────────────────────────────────────────────
 export default function App() {
   const [status,    setStatus]    = useState(null)
@@ -630,16 +716,45 @@ export default function App() {
   const [tab, setTab] = useState('signals')   // 'signals' | 'history'
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState(null)
+  // 'checking' | 'in' | 'out' | 'unreachable'
+  const [authState, setAuthState] = useState('checking')
+  const [authUser,  setAuthUser]  = useState(null)
   const now = useNow()   // refreshes every 30s for the countdown chip
+
+  // ?auth_error=… is set by the backend's /auth/callback when login is rejected.
+  const authError = new URLSearchParams(window.location.search).get('auth_error')
+
+  const checkAuth = useCallback(async () => {
+    setAuthState('checking')
+    try {
+      const { data } = await api.get(`${AUTH}/auth/me`)
+      csrfToken = data.csrf      // seed the request interceptor
+      setAuthUser(data)
+      setAuthState('in')
+    } catch (e) {
+      csrfToken = null
+      setAuthUser(null)
+      // A 401 means "log in"; anything without a response means the backend
+      // itself is unreachable — don't mislabel that as logged out.
+      setAuthState(e.response ? 'out' : 'unreachable')
+    }
+  }, [])
+
+  // Deferred like the fetchAll kickoff below — checkAuth sets state on entry,
+  // which React forbids synchronously inside an effect body.
+  useEffect(() => {
+    const t = setTimeout(checkAuth, 0)
+    return () => clearTimeout(t)
+  }, [checkAuth])
 
   const fetchAll = useCallback(async () => {
     try {
       // Cache-busting: add timestamp so browser never serves stale HTTP-cached API response
       const ts = Date.now()
       const [s, l, h] = await Promise.all([
-        axios.get(`${API}/status`,        { params: { _t: ts }, headers: { 'Cache-Control': 'no-cache' } }),
-        axios.get(`${API}/latest`,        { params: { _t: ts }, headers: { 'Cache-Control': 'no-cache' } }),
-        axios.get(`${API}/history?limit=30`, { params: { _t: ts }, headers: { 'Cache-Control': 'no-cache' } }),
+        api.get(`${API}/status`,        { params: { _t: ts }, headers: { 'Cache-Control': 'no-cache' } }),
+        api.get(`${API}/latest`,        { params: { _t: ts }, headers: { 'Cache-Control': 'no-cache' } }),
+        api.get(`${API}/history?limit=30`, { params: { _t: ts }, headers: { 'Cache-Control': 'no-cache' } }),
       ])
       setBackendOff(false)
       setStatus(s.data)
@@ -647,6 +762,15 @@ export default function App() {
       setHistory(h.data)
       return s.data   // return status so callers can inspect it
     } catch (e) {
+      // Session expired mid-poll (8h TTL, or the backend restarted with an
+      // ephemeral SESSION_SECRET) — fall back to the login screen rather than
+      // flashing "backend offline".
+      if (e.response?.status === 401) {
+        csrfToken = null
+        setAuthUser(null)
+        setAuthState('out')
+        return null
+      }
       setBackendOff(true)
       console.error('Fetch failed — backend offline?', e)
       return null
@@ -656,10 +780,22 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const kickoff = setTimeout(fetchAll, 0)     // initial load
-    const t = setInterval(fetchAll, 30_000)     // refresh every 30s
+    if (authState !== 'in') return               // don't poll a protected API logged out
+    const kickoff = setTimeout(fetchAll, 0)      // initial load
+    const t = setInterval(fetchAll, 30_000)      // refresh every 30s
     return () => { clearTimeout(kickoff); clearInterval(t) }
-  }, [fetchAll])
+  }, [fetchAll, authState])
+
+  const logout = async () => {
+    try {
+      await api.post(`${AUTH}/auth/logout`)
+    } catch (e) {
+      console.error('Logout failed', e)
+    }
+    csrfToken = null
+    setAuthUser(null)
+    setAuthState('out')
+  }
 
   // Clean up poll timer on unmount
   useEffect(() => () => { if (pollTimer) clearInterval(pollTimer) }, [pollTimer])
@@ -667,7 +803,7 @@ export default function App() {
   const triggerRun = async () => {
     setTriggering(true)
     try {
-      await axios.post(`${API}/trigger?email=true`)
+      await api.post(`${API}/trigger?email=true`)
     } catch (e) {
       console.error('Trigger failed', e)
       setTriggering(false)
@@ -726,6 +862,12 @@ export default function App() {
     return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`
   }
 
+  // Auth gate. Placed after every hook above so the hook order stays stable
+  // across renders — React requires that even when we bail out early.
+  if (authState === 'checking')    return <AuthSplash/>
+  if (authState === 'unreachable') return <BackendDownScreen onRetry={checkAuth}/>
+  if (authState === 'out')         return <LoginScreen error={authError}/>
+
   return (
     <div className="app">
       {selected && <StockModal stock={selected} onClose={() => setSelected(null)} />}
@@ -767,6 +909,16 @@ export default function App() {
               ? <><RefreshCw size={14} style={{animation:'spin 1s linear infinite'}}/> Running...</>
               : <><Zap size={14}/> Run Now</>}
           </button>
+          {authUser && (
+            <div className="user-chip" title={authUser.email}>
+              {authUser.picture
+                ? <img src={authUser.picture} alt="" className="user-avatar" referrerPolicy="no-referrer"/>
+                : <span className="user-avatar user-avatar-fallback">{(authUser.email || '?')[0].toUpperCase()}</span>}
+              <button className="logout-btn" onClick={logout} title="Sign out">
+                <LogOut size={14}/>
+              </button>
+            </div>
+          )}
         </div>
       </header>
 

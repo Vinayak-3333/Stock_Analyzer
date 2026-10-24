@@ -158,3 +158,56 @@ apps, hardware MFA enrollment (delegated to the IdP).
     `SameSite=None` for a cross-origin Vercel topology.
   - **Known interim effect:** the existing dashboard's `/api/*` calls now 401
     until Phase 3 wires credentials + login UI. Expected.
+- **Phase 3 — DONE** (this commit). Frontend integration + CSRF.
+  - **Backend** (`backend/auth.py`): CSRF token minted into the session at
+    login (rotated per login), exposed to the SPA via `/auth/me` **and** a
+    JS-readable `stockradar_csrf` cookie (re-issued on every `/auth/me` so
+    pre-CSRF sessions heal). New `require_csrf` dependency compares the
+    `X-CSRF-Token` header against the **session** copy with
+    `secrets.compare_digest` — strictly stronger than cookie-vs-header
+    double-submit, since an attacker who can only replay the ambient cookie
+    still cannot read the token from our origin. Attached to
+    `POST /api/trigger` (`backend/api.py`) and `POST /auth/logout`.
+  - **Frontend** (`frontend/src/App.jsx`): a `withCredentials` axios instance
+    replaces bare `axios`; a request interceptor adds `X-CSRF-Token` to every
+    non-GET/HEAD/OPTIONS call. `AUTH` base is derived as `API` minus the
+    `/api` suffix, so it resolves for both topologies. On load the app calls
+    `/auth/me` and gates on four states — `checking` (splash), `in`
+    (dashboard), `out` (Google login screen), `unreachable` (backend-down
+    screen with a retry). A mid-poll 401 drops back to the login screen
+    instead of flashing "backend offline". Header gained an avatar + sign-out
+    button. `?auth_error=…` from the callback is surfaced on the login screen.
+    Styles in `index.css` (`.auth-*`, `.user-chip`, `.logout-btn`).
+  - **D-4 resolved — both topologies, no code branch needed.** Dev
+    (`:5173`→`:8000`) is cross-*origin* but same-*site* (SameSite ignores
+    port), so the default `SESSION_COOKIE_SAMESITE=lax` works as-is; CORS +
+    `withCredentials` cover the origin difference. A cross-site Vercel
+    deployment needs `SESSION_COOKIE_SAMESITE=none` +
+    `SESSION_COOKIE_SECURE=true` in `.env` — already env-driven, and the CSRF
+    token is the compensating control there.
+  - **Verified** by `backend/_verify_phase3.py` (ad-hoc, forges a
+    SessionMiddleware cookie so no Google round-trip is needed): 18/18 —
+    unauthenticated 401s, `/api/health` public, authenticated 200s, CSRF 403
+    on absent/mismatched header, logout expiring both cookies. Frontend
+    `npm run lint` clean and `npm run build` succeeds.
+  - **Verified live against a real Google login** (2026-10-24, Chrome,
+    `localhost:5173` → `localhost:8000`): logged-out gate shows the login
+    screen, `/auth/login` → Google → `/auth/callback` → `Login OK:
+    <email>` → dashboard renders; `/auth/me` returns the identity + token;
+    session survived a backend restart (persistent `SESSION_SECRET`); in-page
+    checks confirmed the session cookie is invisible to JS while the CSRF
+    cookie is readable; `POST /api/trigger` without the header returned 403
+    **without starting a run**; sign-out returned to the login screen; a
+    second login succeeded.
+  - **Bug found and fixed during live testing — CORS preflight (latent since
+    Phase 2).** The dashboard sends `Cache-Control: no-cache` on its three
+    polling GETs, which makes them non-simple requests. `Cache-Control` was
+    missing from `allow_headers`, so the preflight 400'd and the SPA showed an
+    opaque "Network Error" / "Backend offline" banner *after* a successful
+    login. Phase 2 never caught this because every `/api/*` call was 401ing
+    before CORS mattered. `Cache-Control` added to `allow_headers`
+    (`backend/api.py`).
+  - **Carried forward:** sessions are stateless signed cookies (D-3), so
+    logout is *soft* revocation — a copy of the cookie taken before logout
+    stays valid until `SESSION_MAX_AGE` (8h). Bounding that further needs a
+    server-side revocation store; out of scope for v1.

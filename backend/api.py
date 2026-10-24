@@ -58,7 +58,7 @@ from core.lake.manager import close_lake
 from core.events.store import get_event_stats, get_recent_events
 
 # OIDC auth (Phase 1/2): imports cleanly even without Google credentials set.
-from auth import install_auth, require_user, OIDC_ENABLED
+from auth import install_auth, require_csrf, require_user, OIDC_ENABLED
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -238,7 +238,10 @@ app.add_middleware(
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "X-CSRF-Token", "Authorization"],
+    # Cache-Control is required: the dashboard sends it on its polling GETs,
+    # which makes them non-simple requests — omitting it here 400s the
+    # preflight and the SPA sees an opaque "Network Error".
+    allow_headers=["Content-Type", "X-CSRF-Token", "Authorization", "Cache-Control"],
 )
 
 # ── Auth (Phase 1) ──────────────────────────────────────────────────────────────
@@ -307,6 +310,8 @@ def on_shutdown():
 # healthchecks (docker-compose.nas.yml, Dockerfile.backend) can probe it
 # unauthenticated. /auth/* routes are mounted separately and are intentionally
 # public (they ARE the login path).
+# Phase 3: state-changing routes also take Depends(require_csrf), which demands
+# an X-CSRF-Token header matching the session token.
 
 @app.get("/api/health")
 def health():
@@ -378,7 +383,7 @@ def get_run(run_id: int):
     return JSONResponse(sanitize_floats(d))
 
 
-@app.post("/api/trigger", dependencies=[Depends(require_user)])
+@app.post("/api/trigger", dependencies=[Depends(require_user), Depends(require_csrf)])
 def trigger(background_tasks: BackgroundTasks, email: bool = True):
     """Manually trigger analysis (runs in background)."""
     if _run_is_active():
