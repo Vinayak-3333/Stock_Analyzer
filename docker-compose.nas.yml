@@ -25,6 +25,32 @@ services:
       - GMAIL_SENDER=${GMAIL_SENDER}
       - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}
       - RECIPIENT_EMAIL=${RECIPIENT_EMAIL}
+      # ── OIDC auth (REQUIRED) ──────────────────────────────────────────────
+      # Without OIDC_CLIENT_ID/SECRET the backend boots with auth disabled:
+      # /auth/* returns 503 and every /api/* route 401s, with no way to log in.
+      # OIDC_REDIRECT_URI must exactly match an Authorized redirect URI on the
+      # Google Cloud OAuth client.
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
+      - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI}
+      - FRONTEND_URL=${FRONTEND_URL}
+      - ALLOWED_EMAILS=${ALLOWED_EMAILS:-}          # defaults to RECIPIENT_EMAIL
+      # ── Session (REQUIRED) ────────────────────────────────────────────────
+      # SESSION_SECRET must be set and stable, or every container restart
+      # silently invalidates all sessions. Generate with:
+      #   python -c "import secrets; print(secrets.token_urlsafe(48))"
+      - SESSION_SECRET=${SESSION_SECRET}
+      # Behind this nginx the SPA and API share an origin, so lax is correct.
+      # Only a cross-site frontend (e.g. Vercel) needs none + secure=true.
+      - SESSION_COOKIE_SAMESITE=${SESSION_COOKIE_SAMESITE:-lax}
+      - SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE:-false}
+      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-}
+      # ── Hardening (Phase 4) ───────────────────────────────────────────────
+      # Requests arrive via the nginx container, so X-Forwarded-For is set by a
+      # trusted hop — without this every client shares one rate-limit bucket.
+      - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-true}
+      - SECURITY_HSTS_ENABLED=${SECURITY_HSTS_ENABLED:-false}   # true once TLS terminates in front
+      - DOCS_ENABLED=${DOCS_ENABLED:-false}
       # ── Python settings ───────────────────────────────────────────────────
       - PYTHONUTF8=1
       - TZ=Asia/Kolkata

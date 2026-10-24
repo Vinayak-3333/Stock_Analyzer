@@ -16,6 +16,11 @@ build/
 # No env file is tracked — real credentials live only in local .env files.
 # Catch-all: matches .env, .env.nas, .env.nas.example, frontend/.env.example, …
 **/.env*
+# ...with exactly one exception: the root .env.example template, which holds
+# placeholders only and is the documented starting point for a new checkout.
+# Note this is NOT a blanket "*.example" un-ignore — .env.nas.example stays
+# ignored because it contains real credentials despite the name.
+!/.env.example
 
 # ── Database (generated at runtime) ──────────────────────────────────────────
 backend/data/

@@ -21,17 +21,17 @@ os.environ.setdefault("PYTHONUTF8", "1")
 
 # ── Load .env from project root (backend is launched from backend/ subdir) ─────
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# `.env` is the single source of configuration. There used to be a backfill
+# from `.env.nas.example` for any key `.env` left empty, but that file is
+# gitignored and held real credentials, so an "example" file was silently
+# supplying production config. Everything it actually provided
+# (DEEP_ANALYSIS_COUNT, FUNDAMENTALS_CACHE_TTL_DAYS) already has an identical
+# default in code, so the backfill was removed rather than reimplemented.
 try:
-    from dotenv import load_dotenv, dotenv_values
-    _env_file    = _PROJECT_ROOT / ".env"
-    _env_example = _PROJECT_ROOT / ".env.nas.example"
+    from dotenv import load_dotenv
+    _env_file = _PROJECT_ROOT / ".env"
     if _env_file.exists():
         load_dotenv(dotenv_path=str(_env_file), override=False)
-    # Backfill any key that is still empty from .env.nas.example
-    if _env_example.exists():
-        for _k, _v in dotenv_values(str(_env_example)).items():
-            if _v and not os.environ.get(_k):
-                os.environ[_k] = _v
     logging.getLogger("stockradar").info("Env loaded from %s", _env_file)
 except Exception as _e:
     pass
