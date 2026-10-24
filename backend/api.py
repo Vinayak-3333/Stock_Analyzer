@@ -32,12 +32,7 @@ try:
         for _k, _v in dotenv_values(str(_env_example)).items():
             if _v and not os.environ.get(_k):
                 os.environ[_k] = _v
-    logging.getLogger("stockradar").info(
-        "Env loaded from %s (AV key present: %s, TD key present: %s)",
-        _env_file,
-        bool(os.environ.get("ALPHA_VANTAGE_API_KEY")),
-        bool(os.environ.get("TWELVE_DATA_API_KEY")),
-    )
+    logging.getLogger("stockradar").info("Env loaded from %s", _env_file)
 except Exception as _e:
     pass
 

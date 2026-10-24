@@ -206,18 +206,14 @@ GMAIL_SENDER=your@gmail.com
 GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx   # 16-char Gmail App Password
 RECIPIENT_EMAIL=your@gmail.com
 
-# Optional — market-data providers and tuning knobs
-MARKET_DATA_PROVIDER_ORDER=twelve_data,alpha_vantage,fmp,finnhub,groww
-ALPHA_VANTAGE_API_KEY=
-FINNHUB_API_KEY=
-TWELVE_DATA_API_KEY=
-FMP_API_KEY=
-NEWSAPI_KEY=
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=
+# Optional — tuning knobs
 DEEP_ANALYSIS_COUNT=400
 FUNDAMENTALS_CACHE_TTL_DAYS=7
 ```
+> No market-data API keys are needed. All price, fundamental and news data comes
+> from NSE and Yahoo, which require no credentials. The keyed-provider chain
+> (Alpha Vantage / Finnhub / Twelve Data / FMP) was removed once it was
+> confirmed dead — see git history if you ever want it back.
 > ⚠️ Never hardcode credentials in source files and never commit `.env` — it's gitignored for a reason.
 
 ### 3. Start the backend

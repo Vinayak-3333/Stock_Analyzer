@@ -1,12 +1,9 @@
-# ── Core analysis (existing) ───────────────────────────────────────────────────
+# ── Core analysis ──────────────────────────────────────────────────────────────
 yfinance>=0.2.40
 pandas>=2.0.0
-ta>=0.11.0
+ta>=0.11.0              # indicators in core/features/technical.py
 requests>=2.31.0
 curl_cffi>=0.7.0        # NSE warm-up needs Chrome TLS impersonation (Akamai)
-schedule>=1.2.0
-beautifulsoup4>=4.12.0
-lxml>=4.9.0
 
 # ── Backend API ────────────────────────────────────────────────────────────────
 fastapi>=0.110.0
@@ -14,21 +11,23 @@ uvicorn[standard]>=0.29.0
 apscheduler>=3.10.0
 pytz>=2024.1
 
-# ── Auth / OIDC (Phase 1 security) ──────────────────────────────────────────────
+# ── Auth / OIDC + hardening ────────────────────────────────────────────────────
 authlib>=1.3.0          # OIDC/OAuth2 client, JWKS validation, PKCE
-httpx>=0.27.0           # async HTTP client used by Authlib's Starlette integration
+httpx>=0.27.0           # runtime dep of Authlib's Starlette integration — never
+                        # imported directly, so don't "clean it up"
 itsdangerous>=2.1.2     # signs the Starlette session cookie
 
 # ── Data Lake ─────────────────────────────────────────────────────────────────
 duckdb>=0.10.0
 
 # ── Event Bus (Kafka) ─────────────────────────────────────────────────────────
-kafka-python>=2.0.2
+kafka-python>=2.0.2     # optional: core/events/bus.py falls back to LocalEventBus
 
-# ── Feature cache ─────────────────────────────────────────────────────────────
+# ── Declared but not yet imported ─────────────────────────────────────────────
+# Kept deliberately: redis backs the docker-compose service and the planned
+# server-side session store; the ML stack is for the queued factor re-weighting
+# work (IC/ridge-learned scoring weights). Nothing imports them today.
 redis>=5.0.0
-
-# ── ML Engine ─────────────────────────────────────────────────────────────────
 scikit-learn>=1.4.0
 xgboost>=2.0.0
 lightgbm>=4.3.0
@@ -41,12 +40,5 @@ vaderSentiment>=3.3.2
 # transformers>=4.40.0   # Uncomment to enable FinBERT (requires torch, ~500MB download)
 # torch>=2.2.0           # Uncomment for FinBERT
 
-# ── Backtesting ───────────────────────────────────────────────────────────────
-# vectorbt>=0.26.0     # Uncomment to enable VectorBT (large install)
-
-# ── Alerts ────────────────────────────────────────────────────────────────────
-python-telegram-bot>=21.0.0   # Telegram push alerts
-
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0          # .env config
-concurrent-log-handler>=0.9.25
