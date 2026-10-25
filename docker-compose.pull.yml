@@ -1,0 +1,43 @@
+# ── Override: pull prebuilt images instead of building on the host ────────────
+#
+#   docker compose -f docker-compose.funnel.yml -f docker-compose.pull.yml up -d
+#
+# Why this exists: building on a 1 GB instance is the riskiest step of a small
+# free-tier deployment. `npm ci` plus a Vite build is memory-hungry and is the
+# most likely thing to OOM — and when it does it usually looks like an opaque
+# "killed" rather than an out-of-memory error.
+#
+# Only usable where the host architecture matches the published images:
+#   GCP e2-micro / AWS t3.micro  -> x86_64  -> works
+#   Oracle Ampere A1             -> arm64   -> does NOT; the CI workflow builds
+#                                              amd64 only. Build from source
+#                                              there (plain docker-compose.funnel.yml).
+#
+# BEFORE using this, the images must actually contain the auth code. CI only
+# builds on pushes to master, where none of the OIDC work lives. Publish
+# alt-approach images manually:
+#
+#   GitHub -> Actions -> "Build Docker Images" -> Run workflow
+#            -> Use workflow from: alt-approach -> Run
+#
+# Note that tags `:latest`, so this overwrites whatever master last published.
+# Harmless while master is undeployed; revisit if that changes.
+#
+# If the packages are private (the GitHub default), authenticate on the host
+# first with a PAT that has read:packages:
+#
+#   echo <TOKEN> | docker login ghcr.io -u <github-username> --password-stdin
+#
+# Alternatively make the two packages public from their GitHub package settings.
+
+services:
+  stockradar-frontend:
+    # !reset drops the `build:` block inherited from the base file, so compose
+    # pulls rather than builds. The CI workflow builds this image with
+    # VITE_API_URL=/api — exactly the same-origin setting this needs.
+    build: !reset null
+    image: ghcr.io/vinayak-3333/stock-analyzer-frontend:latest
+
+  stockradar-backend:
+    build: !reset null
+    image: ghcr.io/vinayak-3333/stock-analyzer-backend:latest

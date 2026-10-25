@@ -4,19 +4,27 @@ Two paths are supported. Both end up at a **single HTTPS origin** serving the
 SPA and API, locked to your Google account — Google OIDC refuses non-HTTPS
 redirect URIs and raw IPs, so TLS on a real hostname is mandatory either way.
 
-| | **Tailscale Funnel** (`docker-compose.funnel.yml`) | **Cloud VM** (`docker-compose.cloud.yml`) |
-|---|---|---|
-| Cost | Free | Free tier or ~€4/mo |
-| Needs a card | **No** | Yes |
-| TLS | Funnel handles it | Caddy + Let's Encrypt |
-| Open ports / DNS | None | 80, 443 + a DNS record |
-| Works behind CGNAT | Yes | N/A |
-| Uptime | Only while the machine is awake | Always on |
+| | **Part 1** — Funnel on your machine | **Part 2** — GCP + Funnel | **Part 3** — cloud VM + Caddy |
+|---|---|---|---|
+| Compose file | `funnel.yml` | `funnel.yml` | `cloud.yml` |
+| Cost | Free | Free tier | Free tier or ~€4/mo |
+| Needs a card | **No** | Yes | Yes |
+| TLS | Funnel | Funnel | Caddy + Let's Encrypt |
+| Open ports / DNS | None | None | 80, 443 + DNS record |
+| Custom domain | No (`*.ts.net`) | No (`*.ts.net`) | **Yes** |
+| Uptime | While the machine is awake | Always on | Always on |
 
-Funnel is the fastest way to a working HTTPS deployment and needs no cloud
-account at all. Its one real limitation is uptime: a sleeping machine takes the
-site down *and* freezes the APScheduler timers, so scheduled runs are
-best-effort. Move to a cloud VM when that matters.
+**Start with Part 1** — fastest route to a working HTTPS deployment, no cloud
+account at all. Its only real limitation is uptime: a sleeping machine takes
+the site down *and* freezes the APScheduler timers, so scheduled runs are
+best-effort.
+
+**Part 2 is the upgrade** and is the same stack on a host that never sleeps.
+Keeping Funnel on the VM means no Caddy, no ACME, no DNS record and no open
+firewall ports — only `APP_DOMAIN` changes.
+
+**Part 3 only if you want a custom domain.** That is the one thing Funnel
+cannot do, since it serves `*.ts.net` exclusively.
 
 ---
 
@@ -101,23 +109,36 @@ curl -si https://<device>.<tailnet>.ts.net/auth/me | head -1   # 401 when logged
 Then open the URL in a browser, sign in with Google, and confirm the dashboard
 loads with Market Pulse populated.
 
-## 8. Afterwards — check whether the client IP survives
+## 8. The client-IP question — already settled
 
-`TRUST_PROXY_HEADERS` is left **off** here, because whether Funnel forwards a
-client `X-Forwarded-For` is unverified for this project, and trusting the
-header when the proxy does not set it reliably is worse than not trusting it.
-After a login:
+`TRUST_PROXY_HEADERS` defaults to **on** for this path. That was verified on
+2026-10-25 rather than assumed, and the reasoning is worth keeping because the
+default looks dangerous out of context:
+
+| Condition | `ip=` recorded in `audit.log` |
+|---|---|
+| trust off | `172.19.0.3` — the nginx container; every caller in one bucket |
+| trust on | a real public client IPv6 — Funnel *does* forward the header |
+| trust on + forged `X-Forwarded-For` | the **real** address, not the forged one |
+
+nginx appends with `$proxy_add_x_forwarded_for`, so a client-supplied header
+would normally end up left-most and attacker-controlled — which is exactly why
+the limiter distrusts it by default. Tailscale **overwrites** the header
+instead of appending, so the forged value never survives. With the backend
+publishing no port, the only path in is Funnel → nginx → backend, which makes
+trusting it safe and buys real per-client rate limiting.
+
+Confirm it on your own deployment after a login:
 
 ```bash
 docker compose -f docker-compose.funnel.yml exec stockradar-backend \
   tail -5 /app/backend/data/audit.log
 ```
 
-If `ip=` shows a real public client address, set `TRUST_PROXY_HEADERS=true` in
-`.env` and recreate — anonymous callers then get per-IP rate-limit buckets
-instead of sharing one. If it shows a loopback or Tailscale address, leave it
-off; the per-identity limit still applies once logged in, which is what matters
-for a single-user deployment.
+Expect a real client address in `ip=`. If you instead see a Docker-internal
+address like `172.x.x.x`, set `TRUST_PROXY_HEADERS=false` and re-check — a
+wrong value here costs accuracy in the audit trail and per-IP limiting, not
+security.
 
 ## Notes
 
@@ -135,7 +156,199 @@ for a single-user deployment.
 
 ---
 
-# Part 2 — Oracle Cloud Always Free
+# Part 2 — Google Cloud `e2-micro` (always free) + Funnel
+
+The upgrade path from Part 1: identical stack, but on a host that never sleeps.
+Running Funnel **on the VM** keeps the whole Caddy/ACME/DNS/firewall layer out
+of the picture — nothing from Part 3 is needed.
+
+```
+Internet ──TLS──> Funnel (on the VM) ──> nginx 127.0.0.1:8088 ──> backend:8000
+```
+
+What actually changes from the laptop deployment: `APP_DOMAIN` becomes the VM's
+own `ts.net` name, and you add one more redirect URI. That is it.
+
+## 1. Create the instance
+
+Compute Engine → Create instance.
+
+- **Machine type:** `e2-micro`
+- **Region:** `us-west1`, `us-central1` or `us-east1` — **free only in these
+  three.** Picking `asia-south1` because it is near you bills at full rate.
+  Latency is irrelevant here: the pipeline runs server-side on a schedule and
+  you only load the dashboard occasionally.
+- **Boot disk:** Ubuntu 22.04/24.04 LTS, **30 GB, Standard persistent disk**.
+  New VMs often default to `pd-balanced`, which is **not** in the free tier.
+- **Firewall:** leave HTTP/HTTPS **unchecked**. Funnel needs no inbound ports —
+  that is the point.
+
+No static IP needed either, for the same reason. Tailscale handles reachability.
+
+## 2. Prepare the box
+
+SSH in from the console (easiest — no key handling), then:
+
+```bash
+sudo apt update && sudo apt install -y docker.io docker-compose-v2 git
+sudo usermod -aG docker $USER && newgrp docker
+
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up            # prints a login URL — open it and authorise
+```
+
+**Add swap.** 1 GB of RAM is the real constraint, and swap turns a hard OOM
+kill into merely-slow:
+
+```bash
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+free -h
+```
+
+## 3. Get the code and find the hostname
+
+```bash
+git clone https://github.com/Vinayak-3333/Stock_Analyzer.git
+cd Stock_Analyzer
+git checkout alt-approach        # the OIDC work is not on master
+
+tailscale status                 # note this machine's name
+```
+
+Hostname is `<vm-name>.<tailnet>.ts.net` — same tailnet as the laptop, so the
+suffix matches; only the device part differs.
+
+## 4. Register the redirect URI
+
+Google Cloud Console → Credentials → your OAuth client → add:
+
+```
+https://<vm-name>.<tailnet>.ts.net/auth/callback
+```
+
+Keep the laptop and localhost entries. A client can hold several, and keeping
+them means you can fall back without reconfiguring Google.
+
+## 5. Configure
+
+```bash
+cp .env.example .env
+python3 -c "import secrets; print(secrets.token_urlsafe(48))"   # SESSION_SECRET
+nano .env
+```
+
+Set `APP_DOMAIN` to the VM's `ts.net` name, plus `SESSION_SECRET`, the three
+`GMAIL_*` and two `OIDC_CLIENT_*`. Then the tuning that 1 GB and two shared
+burstable vCPUs require:
+
+```bash
+TIER2_WORKERS=4               # 16 is a laptop figure
+BULK_PARALLEL_CHUNKS=1
+TIER2_DEADLINE_MINUTES=45     # see below
+```
+
+**`TIER2_DEADLINE_MINUTES` is the one to get right.** It is a *hard* wall-clock
+budget, and a run that exceeds it completes with **partial results** rather
+than failing — so a too-low value silently drops symbols rather than erroring.
+Tier 2 took 203 s on the laptop; expect several times that here. Start at 45,
+then lower it once you have seen a real run's duration in the logs.
+
+You may also reuse the laptop's `.env` wholesale — only `APP_DOMAIN` must
+differ. Keeping `SESSION_SECRET` identical is fine and means sessions survive a
+move between hosts.
+
+## 6. Start
+
+Two options. **Pulling is strongly preferred on 1 GB**, because `npm ci` plus a
+Vite build is the single most likely thing to OOM, and it fails as an opaque
+"killed" rather than anything mentioning memory.
+
+**Pull (recommended)** — `e2-micro` is x86_64, so the amd64 CI images fit. They
+must first contain the auth code, which master-built images do not:
+
+> GitHub → Actions → "Build Docker Images" → **Run workflow** → *Use workflow
+> from:* `alt-approach` → Run.
+
+```bash
+# if the packages are private (GitHub's default):
+echo <PAT_with_read:packages> | docker login ghcr.io -u <github-username> --password-stdin
+
+docker compose -f docker-compose.funnel.yml -f docker-compose.pull.yml up -d
+```
+
+**Build on the VM** (no CI dependency, slower, riskier on 1 GB):
+
+```bash
+docker compose -f docker-compose.funnel.yml up -d --build
+```
+
+Then publish:
+
+```bash
+curl -s http://127.0.0.1:8088/api/health      # {"status":"ok"} before exposing
+tailscale funnel --bg 8088
+tailscale funnel status
+```
+
+## 7. Verify
+
+```bash
+curl -I https://<vm-name>.<tailnet>.ts.net/api/health      # 200, valid cert
+docker compose -f docker-compose.funnel.yml logs stockradar-backend | head -20
+```
+
+Expect `Auth wired (OIDC enabled: True)` and `trust_proxy=on` in the posture
+line. Then sign in through a browser and trigger a run — **watch the first one
+end to end**, since that is what tells you whether the tuning above is right:
+
+```bash
+docker compose -f docker-compose.funnel.yml logs -f stockradar-backend \
+  | grep -E "Tier 1:|Tier 2 progress|Tier 2 finished|deadline|Email sent"
+```
+
+If you see Tier 2 stopping at the deadline rather than at 400/400, raise
+`TIER2_DEADLINE_MINUTES` or lower `DEEP_ANALYSIS_COUNT`.
+
+Watch memory during that first run from a second shell:
+
+```bash
+free -h; docker stats --no-stream
+```
+
+For reference, idle on the laptop is ~109 MiB for the backend and ~14 MiB for
+the frontend. If swap is being consumed heavily during Tier 2, drop
+`TIER2_WORKERS` to 2.
+
+## 8. Decommission the laptop deployment
+
+Once the VM is serving, stop the laptop one so two schedulers do not both run
+and email you:
+
+```bash
+# on the laptop
+tailscale funnel --https=443 off
+docker compose -f docker-compose.funnel.yml down
+```
+
+To carry the run history across, copy `backend/data/stockradar.db` from the
+laptop volume to the VM before starting it — otherwise the dashboard begins at
+run 1 again.
+
+## Notes
+
+- **The sleep-freeze problem disappears here.** The July nudge fix (`ec4c043`)
+  exists because a sleeping laptop froze APScheduler's timers. A VM does not
+  sleep, and `TZ=Asia/Kolkata` in the container means the 09:15/15:30 cron
+  triggers mean what they say.
+- **Free-tier billing still needs watching.** The region, the `pd-standard`
+  disk and the single `e2-micro` are the three things that silently cost money
+  if you get them wrong. Set a budget alert at ₹100 and you will know early.
+
+---
+
+# Part 3 — Oracle Cloud Always Free
 
 Target: a single always-on VM serving the dashboard and API from **one HTTPS
 origin**, locked to your Google account.

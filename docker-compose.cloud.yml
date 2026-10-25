@@ -106,6 +106,13 @@ services:
       # start lower and raise it once you have seen a real run's duration.
       - TIER2_WORKERS=${TIER2_WORKERS:-8}
       - DEEP_ANALYSIS_COUNT=${DEEP_ANALYSIS_COUNT:-400}
+      # TIER2_DEADLINE_MINUTES is a HARD wall-clock budget — a run that exceeds
+      # it finishes with partial results rather than failing loudly, so raise it
+      # on a slow instance instead of silently losing symbols.
+      - TIER2_DEADLINE_MINUTES=${TIER2_DEADLINE_MINUTES:-20}
+      - BULK_PARALLEL_CHUNKS=${BULK_PARALLEL_CHUNKS:-2}
+      - FUNDAMENTALS_CACHE_TTL_DAYS=${FUNDAMENTALS_CACHE_TTL_DAYS:-7}
+      - ANALYSIS_STALE_MINUTES=${ANALYSIS_STALE_MINUTES:-90}
       # ── Python / locale ─────────────────────────────────────────────────────
       - PYTHONUTF8=1
       - TZ=Asia/Kolkata                     # scheduler fires 09:15 / 15:30 IST

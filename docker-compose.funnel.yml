@@ -93,8 +93,16 @@ services:
       - RATE_LIMIT_AUTH=${RATE_LIMIT_AUTH:-20}
       - RATE_LIMIT_API=${RATE_LIMIT_API:-240}
       # ── Pipeline tuning ─────────────────────────────────────────────────────
+      # All of these were documented as tunable but only two were passed
+      # through. TIER2_DEADLINE_MINUTES matters most on a weak host: it is a
+      # HARD wall-clock budget, and a run that exceeds it finishes with partial
+      # results rather than failing loudly.
       - TIER2_WORKERS=${TIER2_WORKERS:-16}
       - DEEP_ANALYSIS_COUNT=${DEEP_ANALYSIS_COUNT:-400}
+      - TIER2_DEADLINE_MINUTES=${TIER2_DEADLINE_MINUTES:-20}
+      - BULK_PARALLEL_CHUNKS=${BULK_PARALLEL_CHUNKS:-2}
+      - FUNDAMENTALS_CACHE_TTL_DAYS=${FUNDAMENTALS_CACHE_TTL_DAYS:-7}
+      - ANALYSIS_STALE_MINUTES=${ANALYSIS_STALE_MINUTES:-90}
       # ── Python / locale ─────────────────────────────────────────────────────
       - PYTHONUTF8=1
       - TZ=Asia/Kolkata                     # scheduler fires 09:15 / 15:30 IST
