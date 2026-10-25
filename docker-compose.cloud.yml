@@ -95,6 +95,12 @@ services:
       - TRUST_PROXY_HEADERS=true
       - SECURITY_HSTS_ENABLED=true          # TLS terminates at Caddy
       - DOCS_ENABLED=${DOCS_ENABLED:-false} # keep the schema private in prod
+      # Rate limits. Tunable in .env.example but they were never passed through
+      # to the container, so edits there silently did nothing.
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      - RATE_LIMIT_TRIGGER=${RATE_LIMIT_TRIGGER:-5}
+      - RATE_LIMIT_AUTH=${RATE_LIMIT_AUTH:-20}
+      - RATE_LIMIT_API=${RATE_LIMIT_API:-240}
       # ── Pipeline tuning ─────────────────────────────────────────────────────
       # Default is 32, sized for a laptop. Free-tier vCPUs are far weaker, so
       # start lower and raise it once you have seen a real run's duration.

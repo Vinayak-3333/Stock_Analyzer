@@ -73,16 +73,25 @@ services:
       - SESSION_COOKIE_SECURE=true          # Funnel is HTTPS-only
       - CORS_ALLOW_ORIGINS=https://${APP_DOMAIN}
       # ── Hardening ───────────────────────────────────────────────────────────
-      # Left OFF by default, unlike the Caddy setup. Whether Funnel forwards a
-      # client X-Forwarded-For is not something this project has verified, and
-      # trusting the header when the proxy does not set it reliably is worse
-      # than not trusting it. Either way the per-identity rate limit still
-      # applies once logged in; only the anonymous per-IP bucket is affected.
-      # Check audit.log after a login: if ip= shows a real client address,
-      # turning this on is safe.
-      - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-false}
+      # ON, and verified rather than assumed (2026-10-25, see DAILY-NOTES DN-20):
+      #   * with it off, audit.log recorded ip=172.19.0.3 — the nginx container,
+      #     i.e. every caller sharing one rate-limit bucket;
+      #   * with it on, a real public client IPv6 appeared, so Funnel does
+      #     forward X-Forwarded-For;
+      #   * a request carrying a forged `X-Forwarded-For: 203.0.113.99` was NOT
+      #     trusted — the real address was logged instead, so Tailscale
+      #     OVERWRITES the header rather than appending to a client-supplied
+      #     one. That is what makes trusting it safe here.
+      # The backend publishes no port, so the only path in is Funnel -> nginx.
+      - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-true}
       - SECURITY_HSTS_ENABLED=true          # Funnel serves HTTPS only
       - DOCS_ENABLED=${DOCS_ENABLED:-false}
+      # Rate limits. These were tunable in .env.example but never reached the
+      # container, so .env edits silently did nothing — the defaults applied.
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      - RATE_LIMIT_TRIGGER=${RATE_LIMIT_TRIGGER:-5}
+      - RATE_LIMIT_AUTH=${RATE_LIMIT_AUTH:-20}
+      - RATE_LIMIT_API=${RATE_LIMIT_API:-240}
       # ── Pipeline tuning ─────────────────────────────────────────────────────
       - TIER2_WORKERS=${TIER2_WORKERS:-16}
       - DEEP_ANALYSIS_COUNT=${DEEP_ANALYSIS_COUNT:-400}

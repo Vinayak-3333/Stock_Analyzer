@@ -39,6 +39,7 @@ future you) can pick up without re-deriving context.
 | [DN-17](#dn-17) | 2026-10-25 | Build images on the instance instead of pulling from ghcr |
 | [DN-18](#dn-18) | 2026-10-25 | DuckDNS for the hostname; reserve the Oracle public IP |
 | [DN-19](#dn-19) | 2026-10-25 | Oracle signup blocked → Tailscale Funnel now, cloud VM later |
+| [DN-20](#dn-20) | 2026-10-25 | Trust `X-Forwarded-For` behind Funnel — verified unspoofable, not assumed |
 
 ---
 
@@ -178,9 +179,71 @@ dashboard is never exposed to whatever local network the laptop joins next.
 `X-Forwarded-For` behaviour is unverified for this project; the runbook says to
 check `audit.log` after a login and flip it on only if a real client IP appears.
 
+---
+
+## 2026-10-25 (evening) — first live deployment
+
+**StockRadar is deployed and publicly reachable** at
+`https://laptop-svtk11i1.tail7679a0.ts.net`, behind Google login, over TLS.
+First time the project has run anywhere but localhost.
+
+### Verified end to end
+Public `/api/health` → `{"status":"ok"}` from an external vantage point (not
+just locally, which would have proved nothing — MagicDNS resolves the hostname
+to the tailnet IP from this machine, so a local curl never tests the public
+path). Valid Tailscale certificate. `/auth/me` → 401 publicly. Real Google
+login through Funnel → dashboard. CSRF-protected `/api/trigger` → a full
+400-stock run in 203 s, email sent, `BEARISH / 16.86 / −0.39` persisted.
+Security headers including HSTS survived the Funnel → nginx → backend chain.
+
+### Found
+- **No `.dockerignore` existed.** `Dockerfile.backend` builds with the project
+  root as context and does `COPY . .`, so the real `.env` — OIDC client
+  secret, Gmail app password, `SESSION_SECRET` — plus the full `.git` history
+  would have been baked into an image layer, where `docker history` exposes it
+  and any push carries it. Caught before the first build. Context 257 → 108 MB.
+  The published ghcr images are unaffected by the `.env` part (CI has no
+  `.env`) but do contain `.git`.
+- **Port 8080 was occupied by `TNSLSNR`** — the local Oracle Database listener,
+  which serves an HTTP endpoint there by default. Moved to 8088. The first
+  `up` silently created the frontend with *no* port mapping rather than
+  failing, so an early health check was actually hitting Oracle's 404 page and
+  looked like a working stack.
+- **Rate-limit settings never reached the container.** `RATE_LIMIT_*` are
+  documented as tunable in `.env.example`, but neither compose file passed them
+  through — editing `.env` silently did nothing and the defaults always
+  applied. Now wired in both.
+
+### <a id="dn-20"></a>DN-20 — Trust `X-Forwarded-For` behind Funnel, on evidence
+Shipped with `TRUST_PROXY_HEADERS=false` because the behaviour was unverified.
+Tested it rather than leaving it to assumption:
+
+| Condition | `ip=` recorded |
+|---|---|
+| trust off | `172.19.0.3` — the nginx container; every caller in one bucket |
+| trust on | a real public client IPv6 — so Funnel *does* forward the header |
+| trust on + forged `X-Forwarded-For: 203.0.113.99` | the **real** address, not the forged one |
+
+The third row is the one that matters. nginx appends with
+`$proxy_add_x_forwarded_for`, so a client-supplied header would normally end up
+left-most and attacker-controlled — which is exactly why the limiter does not
+trust it by default. But Tailscale **overwrites** the header rather than
+appending, so the forged value never survives. Combined with the backend
+publishing no port — the only path in is Funnel → nginx → backend — trusting
+it is safe, and it buys genuine per-client rate limiting instead of one shared
+anonymous bucket.
+
+Caveat recorded honestly: the spoofing attempt was made over the tailnet route,
+not from a genuinely external host. The same Tailscale proxy terminates both,
+so it very likely holds publicly, but that specific case is untested.
+
 ### Open
-- Nothing is deployed yet. Funnel enablement, hostname, redirect URI and `.env`
-  still to do — see `docs/DEPLOYMENT.md` Part 1.
+- **Phase 6 is now unblocked.** DN-12 deferred the merge to `master` for want
+  of a production backend; there is one. Whether to merge is a separate
+  decision — the deployment is on a laptop, not an always-on host.
+- Uptime is still laptop-bound (DN-19). The GCP move remains the fix.
+- Dashboard history starts at run 1 — fresh volume. The old 48 runs are still
+  in the local `backend/data/stockradar.db`; the runbook has a copy-in command.
 - DuckDNS record (`stockradar-vk.duckdns.org`) is unused on the Funnel path.
   Keep it for the cloud route; it currently points at a home Airtel IP.
 - **Phase 6 becomes unblocked once this is proven.** DN-12 deferred the merge
