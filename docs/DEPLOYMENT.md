@@ -1,4 +1,141 @@
-# Deployment — Oracle Cloud Always Free
+# Deployment
+
+Two paths are supported. Both end up at a **single HTTPS origin** serving the
+SPA and API, locked to your Google account — Google OIDC refuses non-HTTPS
+redirect URIs and raw IPs, so TLS on a real hostname is mandatory either way.
+
+| | **Tailscale Funnel** (`docker-compose.funnel.yml`) | **Cloud VM** (`docker-compose.cloud.yml`) |
+|---|---|---|
+| Cost | Free | Free tier or ~€4/mo |
+| Needs a card | **No** | Yes |
+| TLS | Funnel handles it | Caddy + Let's Encrypt |
+| Open ports / DNS | None | 80, 443 + a DNS record |
+| Works behind CGNAT | Yes | N/A |
+| Uptime | Only while the machine is awake | Always on |
+
+Funnel is the fastest way to a working HTTPS deployment and needs no cloud
+account at all. Its one real limitation is uptime: a sleeping machine takes the
+site down *and* freezes the APScheduler timers, so scheduled runs are
+best-effort. Move to a cloud VM when that matters.
+
+---
+
+# Part 1 — Tailscale Funnel
+
+```
+Internet ──TLS──> Tailscale Funnel ──> nginx 127.0.0.1:8080 ──> backend:8000
+```
+
+## 1. Install Tailscale and enable the features Funnel needs
+
+Install from <https://tailscale.com/download> and sign in (Google/GitHub — no
+card). Then, in the admin console, two things must be on:
+
+- **DNS → MagicDNS**, and **HTTPS Certificates**. Funnel cannot issue a
+  certificate without these.
+- **Funnel** itself. It is gated by a node attribute; the CLI prints a direct
+  enable link the first time you run it, which is the easiest route.
+
+## 2. Find your Funnel hostname
+
+```bash
+tailscale status            # the first line is this machine; note its name
+```
+
+Your public hostname is `<device>.<tailnet>.ts.net`, e.g.
+`desktop-abc.tail1a2b3c.ts.net`. **Get this before step 3** — the backend bakes
+it into `OIDC_REDIRECT_URI` at startup.
+
+On Windows the CLI lives at `C:\Program Files\Tailscale\tailscale.exe` if it is
+not on your `PATH`.
+
+## 3. Configure
+
+```bash
+cp .env.example .env
+python -c "import secrets; print(secrets.token_urlsafe(48))"   # SESSION_SECRET
+```
+
+Set `APP_DOMAIN` to the `ts.net` hostname, plus `SESSION_SECRET`, the three
+`GMAIL_*` and the two `OIDC_CLIENT_*` values. Leave `OIDC_REDIRECT_URI`,
+`FRONTEND_URL`, `CORS_ALLOW_ORIGINS` and the cookie flags unset — compose
+derives them from `APP_DOMAIN`.
+
+## 4. Register the redirect URI
+
+Google Cloud Console → APIs & Services → Credentials → your OAuth 2.0 Web
+client → **Authorized redirect URIs** → Add:
+
+```
+https://<device>.<tailnet>.ts.net/auth/callback
+```
+
+Exact match — `https`, no trailing slash. Keep the localhost entry for dev.
+
+## 5. Stop the local backend first
+
+If you have been running `uvicorn api:app` directly, stop it. Two backends
+means two schedulers and duplicate alert emails from the same account.
+
+## 6. Start
+
+```bash
+docker compose -f docker-compose.funnel.yml up -d --build
+curl -s http://127.0.0.1:8080/api/health          # {"status":"ok"} before exposing it
+
+tailscale funnel --bg 8080
+tailscale funnel status                            # prints the public URL
+```
+
+The frontend is bound to **127.0.0.1 only**, so nothing is reachable until
+Funnel is explicitly started — and nothing is exposed to the local network even
+then.
+
+## 7. Verify
+
+```bash
+curl -I  https://<device>.<tailnet>.ts.net/api/health      # 200, valid cert
+curl -si https://<device>.<tailnet>.ts.net/auth/me | head -1   # 401 when logged out
+```
+
+Then open the URL in a browser, sign in with Google, and confirm the dashboard
+loads with Market Pulse populated.
+
+## 8. Afterwards — check whether the client IP survives
+
+`TRUST_PROXY_HEADERS` is left **off** here, because whether Funnel forwards a
+client `X-Forwarded-For` is unverified for this project, and trusting the
+header when the proxy does not set it reliably is worse than not trusting it.
+After a login:
+
+```bash
+docker compose -f docker-compose.funnel.yml exec stockradar-backend \
+  tail -5 /app/backend/data/audit.log
+```
+
+If `ip=` shows a real public client address, set `TRUST_PROXY_HEADERS=true` in
+`.env` and recreate — anonymous callers then get per-IP rate-limit buckets
+instead of sharing one. If it shows a loopback or Tailscale address, leave it
+off; the per-identity limit still applies once logged in, which is what matters
+for a single-user deployment.
+
+## Notes
+
+- **History starts empty.** The `backend_data` volume is fresh, so the dashboard
+  shows no runs until the first one completes. To carry over your local history,
+  with the stack stopped:
+
+  ```bash
+  docker run --rm -v stock_analyzer_backend_data:/d -v "$PWD/backend/data":/src \
+    alpine sh -c "cp /src/stockradar.db /d/ 2>/dev/null || true"
+  ```
+
+- **To stop publishing** without touching the containers: `tailscale funnel off`.
+- **DuckDNS is not used on this path.** Keep the record for the cloud route later.
+
+---
+
+# Part 2 — Oracle Cloud Always Free
 
 Target: a single always-on VM serving the dashboard and API from **one HTTPS
 origin**, locked to your Google account.

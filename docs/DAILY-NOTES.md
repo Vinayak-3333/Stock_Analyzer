@@ -38,6 +38,7 @@ future you) can pick up without re-deriving context.
 | [DN-16](#dn-16) | 2026-10-25 | One HTTPS origin behind Caddy; drop the split-Vercel idea |
 | [DN-17](#dn-17) | 2026-10-25 | Build images on the instance instead of pulling from ghcr |
 | [DN-18](#dn-18) | 2026-10-25 | DuckDNS for the hostname; reserve the Oracle public IP |
+| [DN-19](#dn-19) | 2026-10-25 | Oracle signup blocked → Tailscale Funnel now, cloud VM later |
 
 ---
 
@@ -142,9 +143,46 @@ Paired requirement: **reserve the Oracle public IP** (free). The default is
 ephemeral and changes on stop/start, which would silently break DNS *and* the
 registered redirect URI.
 
+### <a id="dn-19"></a>DN-19 — Oracle signup blocked; Tailscale Funnel as the near-term host
+Oracle rejected the account creation (a common failure for Indian signups,
+usually at card verification). Reviewed the alternatives with current terms
+checked rather than from memory:
+
+- **GCP always-free `e2-micro`** — confirmed still free indefinitely, but 1 GB
+  RAM and free *only* in `us-west1`/`us-central1`/`us-east1`; the free disk
+  allowance is `pd-standard`, while new VMs often default to the billable
+  `pd-balanced`. It is **x86_64**, which means the existing amd64 CI images
+  would work — dispatching the workflow against `alt-approach` would produce
+  usable images and avoid an `npm`/Vite build on a 1 GB box.
+- **Hetzner** — my earlier €3.79 figure was **stale**; prices rose through 2026
+  and CX22 is being retired in favour of CX23 at roughly €4.29/mo ex-VAT.
+- **Tailscale Funnel** — free, and the only option that needs **no payment
+  method at all**, which matters because the thing that blocked Oracle would
+  likely block GCP/AWS/Hetzner too.
+
+Chose Funnel now, cloud later. It also *simplifies* the stack: Funnel
+terminates TLS with a real `*.ts.net` certificate, so Caddy, ACME, open
+firewall ports and the DNS record all drop out, and it works behind CGNAT —
+the exact problem that made the home-IP idea unworkable.
+
+**Accepted trade-off, flagged and confirmed:** no always-on hardware is
+available, so this runs on the laptop. The site is down while the machine
+sleeps, and APScheduler timers freeze with it — so scheduled 09:15/15:30 runs
+stay best-effort until a cloud host exists. That is the same limitation
+`ec4c043` exists to mitigate.
+
+`docker-compose.funnel.yml` binds the frontend to **127.0.0.1 only**, so
+nothing is reachable until `tailscale funnel` is explicitly started, and the
+dashboard is never exposed to whatever local network the laptop joins next.
+`TRUST_PROXY_HEADERS` defaults to **off** here because Funnel's
+`X-Forwarded-For` behaviour is unverified for this project; the runbook says to
+check `audit.log` after a login and flip it on only if a real client IP appears.
+
 ### Open
-- Nothing is deployed yet. Instance, firewall (both layers), DuckDNS record,
-  redirect URI and `.env` are all still to do — see `docs/DEPLOYMENT.md`.
+- Nothing is deployed yet. Funnel enablement, hostname, redirect URI and `.env`
+  still to do — see `docs/DEPLOYMENT.md` Part 1.
+- DuckDNS record (`stockradar-vk.duckdns.org`) is unused on the Funnel path.
+  Keep it for the cloud route; it currently points at a home Airtel IP.
 - **Phase 6 becomes unblocked once this is proven.** DN-12 deferred the merge
   to `master` for want of a production backend; this deployment is that
   backend.
