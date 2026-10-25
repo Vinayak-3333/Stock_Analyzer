@@ -1,0 +1,12 @@
+# Build context for Dockerfile.frontend (context is frontend/).
+#
+# node_modules is the big one: the image runs `npm ci` itself, so copying a
+# host-built tree in is both slow and wrong — it may carry native binaries
+# built for a different platform than the builder image.
+
+node_modules
+dist
+.env
+.env.*
+*.log
+.vite
