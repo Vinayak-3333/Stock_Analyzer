@@ -1,10 +1,10 @@
 # OIDC Integration & Security Hardening — Requirements
 
 > Branch: `alt-approach`. Status: **complete for the current topology**
-> (2026-10-24). Phases 1–4 done and verified against a real Google login;
-> Phase 5 config done with secret rotation outstanding; Phase 6 (merge to
-> `master`) deliberately deferred until a production backend exists — see the
-> progress log for the reasoning and the checklist to resume.
+> (2026-10-25). Phases 1–5 done — auth verified against a real Google login,
+> hardening in place, secrets closed. Phase 6 (merge to `master`) is
+> deliberately deferred until a production backend exists; see the progress log
+> for the reasoning and the checklist to resume.
 >
 > This is the design doc we execute step by step. Section 10 is the running
 > record; read it before changing anything here.
@@ -299,9 +299,26 @@ apps, hardware MFA enrollment (delegated to the IdP).
     production config. Removed; everything it provided already had an identical
     code default, so the change is behaviour-neutral. `.env` is now the single
     source, documented by a committable `.env.example`.
-  - **Still open (yours):** rotate the Gmail app password. The four market-data
-    keys no longer need rotating — the dead-code sweep deleted the provider
-    chain, so they are provably unused and can simply be revoked.
+  - **Secrets — CLOSED 2026-10-25.** The long-running "rotate the Gmail app
+    password" thread was based on a wrong premise, corrected by auditing git
+    rather than the notes:
+    - The exposed credential was **hardcoded at `Analyzer.py:59`**, not in an
+      env file. `.env.nas.example` only ever held placeholders. It is reachable
+      in **13 commits on both `origin/master` and `origin/alt-approach`**.
+    - The **live** password was never committed — `git log -S` finds no trace of
+      it on either spacing variant. It had already been rotated at some earlier
+      point, so there was nothing to rotate.
+    - Resolution: the leaked app password was **revoked** in Google
+      (2026-10-25); the live one was correctly left alone and still
+      authenticates. Verified with `backend/_verify_gmail.py` — SMTP auth OK,
+      both worktree `.env` files in sync, secret never printed.
+    - The four market-data keys are moot — the dead-code sweep deleted the
+      provider chain, so they were provably unused.
+    - **Accepted residual risk:** the revoked string stays in those 13 public
+      commits. Rewriting history (`git filter-repo` + force-push both branches)
+      was considered and declined — a revoked credential in history is noise,
+      and the rewrite would be disruptive for no security gain. Revisit only if
+      the repo should be clean for its own sake.
 - **Phase 6 — DEFERRED BY DECISION, not forgotten** (2026-10-24). The merge to
   `master` is deliberately **not** being done, because there is no production
   backend: everything runs on the laptop, and the NAS/Vercel deployments are
