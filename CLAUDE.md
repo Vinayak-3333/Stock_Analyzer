@@ -6,6 +6,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 StockRadar IN — an Indian stock market analyzer. A Python backend scans up to ~2,000 NSE stocks in two tiers — Tier 1 screens the full universe (live quotes from 26 NSE indices, supplemented by bhavcopy / NSE equity-listing symbols via Yahoo, DuckDB-cached symbols as last-resort fallback) with technical scoring only, then Tier 2 runs deep analysis (fundamentals/news/delivery) on the top `DEEP_ANALYSIS_COUNT` (default 400), scores them with a multi-factor engine, persists results, and emails alerts on a schedule; a React dashboard displays the results.
 
+## Daily notes — keep these current
+
+`docs/DAILY-NOTES.md` is the running day-by-day record of what changed and
+**why**, with a decision index (`DN-nn`) at the top.
+
+- **Read it at the start of a session** to pick up context without re-deriving it.
+- **Append to it at the end of any session that changed something**: a dated
+  entry with Shipped / Decisions / Found / Open. Record the reasoning, not just
+  the outcome — a decision without its "why" gets silently reversed later.
+- Non-obvious trade-offs, rejected alternatives and "this looks wrong but is
+  deliberate" notes belong there. Durable architectural facts belong in this
+  file; the security plan lives in `docs/security/`.
+
 ## Commands
 
 ```bash
