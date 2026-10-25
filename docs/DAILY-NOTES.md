@@ -42,6 +42,7 @@ future you) can pick up without re-deriving context.
 | [DN-20](#dn-20) | 2026-10-25 | Trust `X-Forwarded-For` behind Funnel — verified unspoofable, not assumed |
 | [DN-21](#dn-21) | 2026-10-25 | GCP `e2-micro` + Funnel (not Caddy) as the always-on host |
 | [DN-22](#dn-22) | 2026-10-25 | Pull CI images rather than build on 1 GB; `TIER2_WORKERS=4` + 2 GB swap |
+| [DN-23](#dn-23) | 2026-10-25 | Phase 6 — merged `alt-approach` to `master`; `master` is no longer unauthenticated |
 
 ---
 
@@ -295,10 +296,36 @@ enough, so more workers would only add memory pressure.
   GCP one serves. The laptop's `backend_data` volume was **retained**, not
   deleted.
 
+### <a id="dn-23"></a>DN-23 — Phase 6: merged to `master`
+Done the same night, once the always-on host existed. DN-12 had deferred this
+for want of a production backend; that reason was gone.
+
+The merge was clean despite the regime fix existing as **two** commits — the
+original `f8dd8bc` on `alt-approach` and the cherry-pick `871686b` on `master`
+(DN-10). Git's three-way merge resolved the duplicate without conflict, and
+the merged tree hashes **identical** to `alt-approach` (`1b54661`), so both
+branches now carry the same content via different history. Security suite
+40/40 on `master` afterwards.
+
+*(Lint "failed" on `master` only because that worktree has no `node_modules` —
+`eslint` was not installed there. Identical tree to the branch where it passes,
+so it was not worth installing 300 packages to re-prove.)*
+
+**What this changes:** `master`'s ghcr images now contain the auth code. Until
+now `:latest` was the *unauthenticated* build, which made
+`docker-compose.pull.yml` depend on a manual `workflow_dispatch` against
+`alt-approach`. It can now pull from `master` normally.
+
+**What it does not fix:** the Vercel deployment. It rebuilds and will serve the
+login-gated SPA, but its `VITE_API_URL` points at a placeholder backend, so it
+shows the login or backend-unreachable screen. It was already non-functional
+before — pointing at a backend that did not exist — so this is neither a
+regression nor a fix. Making it work would mean pointing it at the GCP host,
+which is cross-site and would need `SameSite=none` plus a CORS entry. Not
+something to do incidentally; see DN-16 for why a split frontend is the worse
+topology anyway.
+
 ### Open
-- **Phase 6 is properly unblocked now.** DN-12 deferred the merge to `master`
-  for want of a production backend. There is one, and it is always-on — so the
-  reason for deferring no longer holds. Still a deliberate decision to make.
 - History on the VM starts at run 1 (fresh volume). The laptop's runs are in
   its retained Docker volume and the local `backend/data/stockradar.db`.
 - CI still builds amd64-only and only from `master`. Fine for GCP; would need
