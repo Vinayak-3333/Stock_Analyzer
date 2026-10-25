@@ -295,6 +295,17 @@ enough, so more workers would only add memory pressure.
 - Verified the handover from outside: the old laptop hostname now 404s and the
   GCP one serves. The laptop's `backend_data` volume was **retained**, not
   deleted.
+- **DN-20 confirmed on GCP too** (not just assumed): `audit.log` records real
+  client addresses — the laptop's tailnet IP for tailnet-routed logins and the
+  home public IP for one that came through Funnel's public path. No
+  Docker-internal `172.x.x.x`, so `TRUST_PROXY_HEADERS=true` is right here.
+- **The audit trail paid for itself on day one.** Four
+  `login.rejected reason=not_allowed` entries preceded the first successful
+  login — Google authenticated fine but the email was not on the allow-list,
+  because the first `.env` written on the VM had `ALLOWED_EMAILS` /
+  `RECIPIENT_EMAIL` wrong. Diagnosed retroactively from a log written before
+  anyone knew to look. Worth remembering that this same line, with an email
+  that is *not* ours, is the signal that someone is probing.
 
 ### <a id="dn-23"></a>DN-23 — Phase 6: merged to `master`
 Done the same night, once the always-on host existed. DN-12 had deferred this
