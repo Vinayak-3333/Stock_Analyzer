@@ -1,0 +1,37 @@
+# StockRadar IN — TLS terminator for the cloud deployment
+#
+# Caddy exists here for one reason: Google OIDC refuses redirect URIs that are
+# not HTTPS, and refuses raw IP addresses. A cloud VM gives you an IP and no
+# certificate, so something has to terminate TLS on a real hostname. Caddy does
+# ACME/Let's Encrypt automatically, including renewal — no certbot, no cron.
+#
+# It deliberately does NOT know about /api or /auth. The frontend nginx already
+# serves the SPA and proxies both to the backend, so everything stays on ONE
+# origin: same-site cookies (SameSite=lax), no CORS, one redirect URI.
+#
+# Both variables come from .env via docker-compose.cloud.yml.
+
+{
+	# Let's Encrypt uses this for expiry warnings. Required for a real cert.
+	email {$ACME_EMAIL}
+}
+
+{$APP_DOMAIN} {
+	encode gzip zstd
+
+	# Single upstream: nginx handles SPA routing, /api/ and /auth/.
+	reverse_proxy stockradar-frontend:80 {
+		# Caddy sets X-Forwarded-For/Proto by default. nginx appends to the
+		# chain, and the backend reads the LEFT-MOST entry as the client, so
+		# the real IP survives both hops. This is why the backend runs with
+		# TRUST_PROXY_HEADERS=true here — without it every anonymous caller
+		# would share one rate-limit bucket.
+		header_up X-Real-IP {remote_host}
+	}
+
+	# Access log to stdout so `docker compose logs caddy` shows traffic.
+	log {
+		output stdout
+		format console
+	}
+}

@@ -1,0 +1,116 @@
+# ── StockRadar IN — cloud deployment (Oracle Cloud Always Free) ───────────────
+#
+#   docker compose -f docker-compose.cloud.yml up -d --build
+#
+# Differs from docker-compose.nas.yml in three ways that matter:
+#
+#  1. Images are BUILT ON THE INSTANCE, not pulled from ghcr. Oracle's Always
+#     Free capacity is Ampere ARM64 and the CI workflow builds amd64 only; it
+#     also only triggers on master, so the published images contain none of the
+#     OIDC code (which lives on alt-approach). Building here sidesteps both.
+#  2. Caddy terminates TLS in front. Google OIDC requires an HTTPS redirect URI
+#     on a real hostname, which a bare cloud IP cannot provide.
+#  3. The backend publishes NO host port. Everything reaches it through
+#     nginx -> Caddy, so there is exactly one origin and no way to bypass TLS
+#     or hit the API unencrypted on :8000.
+#
+# Requires a .env beside this file. See .env.example (Cloud deployment section).
+
+services:
+  # ── TLS terminator ──────────────────────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: stockradar-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"      # required: Let's Encrypt HTTP-01 challenge + HTTPS redirect
+      - "443:443"
+    environment:
+      - APP_DOMAIN=${APP_DOMAIN}
+      - ACME_EMAIL=${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Named volumes, not bind mounts: losing caddy_data means re-issuing
+      # certificates, and Let's Encrypt rate-limits that (5 per domain per week).
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - stockradar-frontend
+    networks:
+      - stockradar-net
+
+  # ── Frontend: SPA + reverse proxy for /api and /auth ────────────────────────
+  stockradar-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+      args:
+        # Same-origin: the SPA calls /api on its own host, and App.jsx derives
+        # the /auth base by stripping the /api suffix. Do not set a full URL
+        # here or the deployment becomes cross-site and the cookie flags below
+        # stop being correct.
+        VITE_API_URL: /api
+    container_name: stockradar-frontend
+    restart: unless-stopped
+    # No ports: only Caddy talks to this.
+    environment:
+      - BACKEND_UPSTREAM=http://stockradar-backend:8000
+    depends_on:
+      - stockradar-backend
+    networks:
+      - stockradar-net
+
+  # ── Backend: FastAPI + APScheduler ──────────────────────────────────────────
+  stockradar-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: stockradar-backend
+    restart: unless-stopped
+    # No ports: reachable only from the frontend container on the internal net.
+    volumes:
+      - backend_data:/app/backend/data      # SQLite runs + DuckDB lake + audit.log
+    environment:
+      # ── Email alerts ────────────────────────────────────────────────────────
+      - GMAIL_SENDER=${GMAIL_SENDER}
+      - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}
+      - RECIPIENT_EMAIL=${RECIPIENT_EMAIL}
+      # ── OIDC (required — without these every /api/* route 401s) ─────────────
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
+      - OIDC_REDIRECT_URI=https://${APP_DOMAIN}/auth/callback
+      - FRONTEND_URL=https://${APP_DOMAIN}
+      - ALLOWED_EMAILS=${ALLOWED_EMAILS:-}
+      # ── Session ─────────────────────────────────────────────────────────────
+      - SESSION_SECRET=${SESSION_SECRET}
+      # Same-origin behind Caddy+nginx, so lax is correct. Secure MUST be true:
+      # this is HTTPS, and a non-Secure session cookie here would be sent in
+      # cleartext if anything ever downgraded the connection.
+      - SESSION_COOKIE_SAMESITE=lax
+      - SESSION_COOKIE_SECURE=true
+      - CORS_ALLOW_ORIGINS=https://${APP_DOMAIN}
+      # ── Hardening ───────────────────────────────────────────────────────────
+      # Two trusted proxy hops (Caddy -> nginx). Without this the limiter sees
+      # the proxy IP and every anonymous caller shares one bucket.
+      - TRUST_PROXY_HEADERS=true
+      - SECURITY_HSTS_ENABLED=true          # TLS terminates at Caddy
+      - DOCS_ENABLED=${DOCS_ENABLED:-false} # keep the schema private in prod
+      # ── Pipeline tuning ─────────────────────────────────────────────────────
+      # Default is 32, sized for a laptop. Free-tier vCPUs are far weaker, so
+      # start lower and raise it once you have seen a real run's duration.
+      - TIER2_WORKERS=${TIER2_WORKERS:-8}
+      - DEEP_ANALYSIS_COUNT=${DEEP_ANALYSIS_COUNT:-400}
+      # ── Python / locale ─────────────────────────────────────────────────────
+      - PYTHONUTF8=1
+      - TZ=Asia/Kolkata                     # scheduler fires 09:15 / 15:30 IST
+    networks:
+      - stockradar-net
+
+networks:
+  stockradar-net:
+    driver: bridge
+
+volumes:
+  backend_data:
+  caddy_data:
+  caddy_config:
