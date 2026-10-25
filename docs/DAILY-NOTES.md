@@ -40,6 +40,8 @@ future you) can pick up without re-deriving context.
 | [DN-18](#dn-18) | 2026-10-25 | DuckDNS for the hostname; reserve the Oracle public IP |
 | [DN-19](#dn-19) | 2026-10-25 | Oracle signup blocked → Tailscale Funnel now, cloud VM later |
 | [DN-20](#dn-20) | 2026-10-25 | Trust `X-Forwarded-For` behind Funnel — verified unspoofable, not assumed |
+| [DN-21](#dn-21) | 2026-10-25 | GCP `e2-micro` + Funnel (not Caddy) as the always-on host |
+| [DN-22](#dn-22) | 2026-10-25 | Pull CI images rather than build on 1 GB; `TIER2_WORKERS=4` + 2 GB swap |
 
 ---
 
@@ -237,13 +239,70 @@ Caveat recorded honestly: the spoofing attempt was made over the tailnet route,
 not from a genuinely external host. The same Tailscale proxy terminates both,
 so it very likely holds publicly, but that specific case is untested.
 
+### Open at the time
+Uptime was laptop-bound; the GCP move (below) fixed it the same evening.
+
+---
+
+## 2026-10-25 (night) — moved to GCP, laptop decommissioned
+
+**Now running always-on at `https://stockradar.tail7679a0.ts.net`** on a GCP
+`e2-micro`. The laptop deployment is shut down; one scheduler, one host.
+
+### <a id="dn-21"></a>DN-21 — GCP `e2-micro` + Funnel, not Caddy
+Oracle signup stayed blocked, so GCP always-free became the host. Kept
+**Tailscale Funnel on the VM** rather than switching to the Caddy/Let's Encrypt
+path built earlier: no certificates to issue, no DNS record, no inbound
+firewall ports, and `docker-compose.funnel.yml` works unchanged. Only
+`APP_DOMAIN` differed, plus one more redirect URI. The Caddy path stays in the
+repo as Part 3, now worth using only for a custom domain — the one thing
+Funnel cannot do (it serves `*.ts.net` exclusively; the tailnet name can be
+renamed but only to Tailscale-generated word pairs, not chosen text).
+
+Free-tier settings that silently bill if wrong, all documented in the runbook:
+region (free only in three US regions), `pd-standard` not the default
+`pd-balanced`, snapshot backups off. Measured egress too — `/api/latest` is
+568 KB raw but **70 KB gzipped**, so a dashboard poll is ~80 KB and the 1 GB
+monthly free egress covers ~100 hours of open dashboard.
+
+### <a id="dn-22"></a>DN-22 — Pull images; `TIER2_WORKERS=4` + 2 GB swap
+`free -h` on the idle VM showed only **~467 Mi available** — Ubuntu, Docker and
+the GCP agents take half the gigabyte before anything of ours runs. `npm ci`
+plus a Vite build wants 500 MB–1 GB, and an OOM there surfaces as a bare
+`killed` with nothing mentioning memory. So `docker-compose.pull.yml` pulls the
+amd64 CI images instead (`e2-micro` is x86_64, so they fit) — published from
+`alt-approach` via `workflow_dispatch`, since CI only builds on `master` where
+no auth code lives.
+
+Tuning validated against a real run rather than guessed:
+
+| Metric | Laptop (16 workers) | GCP (4 workers) |
+|---|---|---|
+| Tier 2, 400 symbols | 203 s | **643 s** (1.61 s/symbol) |
+| Deadline used | — | ~24% of the 45 min budget |
+| Peak swap | — | **361 Mi** of 2 GB |
+
+No OOM, no truncation, email sent. Swap absorbed the overshoot — without it
+this would have been an OOM kill. Keeping 4 workers: the run is already fast
+enough, so more workers would only add memory pressure.
+
+### Also
+- **The sleep-freeze problem is now moot.** `ec4c043` exists because a sleeping
+  laptop froze APScheduler's timers. A VM does not sleep, and the container
+  runs `TZ=Asia/Kolkata`, so 09:15/15:30 IST mean what they say. Tomorrow's
+  09:15 is the first genuinely reliable scheduled run this project has had.
+- Verified the handover from outside: the old laptop hostname now 404s and the
+  GCP one serves. The laptop's `backend_data` volume was **retained**, not
+  deleted.
+
 ### Open
-- **Phase 6 is now unblocked.** DN-12 deferred the merge to `master` for want
-  of a production backend; there is one. Whether to merge is a separate
-  decision — the deployment is on a laptop, not an always-on host.
-- Uptime is still laptop-bound (DN-19). The GCP move remains the fix.
-- Dashboard history starts at run 1 — fresh volume. The old 48 runs are still
-  in the local `backend/data/stockradar.db`; the runbook has a copy-in command.
+- **Phase 6 is properly unblocked now.** DN-12 deferred the merge to `master`
+  for want of a production backend. There is one, and it is always-on — so the
+  reason for deferring no longer holds. Still a deliberate decision to make.
+- History on the VM starts at run 1 (fresh volume). The laptop's runs are in
+  its retained Docker volume and the local `backend/data/stockradar.db`.
+- CI still builds amd64-only and only from `master`. Fine for GCP; would need
+  `platforms: linux/arm64` if a future host is ARM.
 - DuckDNS record (`stockradar-vk.duckdns.org`) is unused on the Funnel path.
   Keep it for the cloud route; it currently points at a home Airtel IP.
 - **Phase 6 becomes unblocked once this is proven.** DN-12 deferred the merge
