@@ -73,17 +73,49 @@ Do **not** skip this because the security list looks right — Caddy's
 certificate request will fail with an opaque ACME timeout if port 80 is
 unreachable.
 
-## 3. Point a hostname at it
+## 3. Point a hostname at it — DuckDNS, free
 
-Google will not accept the bare IP. You need a real hostname with a valid
-public TLD resolving to the instance's public IP.
+Google will not accept the bare IP, so you need a real hostname. **DuckDNS** is
+free, takes two minutes, and needs no domain purchase.
 
-- **Free:** a dynamic-DNS subdomain such as `yourname.duckdns.org`. The TLD is
-  `.org`, which satisfies Google's public-suffix rule on a plain reading —
-  but **verify before building on it**: paste the redirect URI into Google
-  Cloud Console (step 5); it validates on save and rejects immediately if
-  unhappy. 30 seconds, and it beats guessing.
-- **Paid, no ambiguity:** any domain you own, with an A record to the IP.
+Google's rule is that the host's *public suffix* must be recognised. For
+`yourname.duckdns.org` that holds either way — if `duckdns.org` is itself a PSL
+entry that is the suffix and it is listed; if not, the suffix is `.org`, which
+certainly is. What Google rejects is hosts with no valid suffix at all
+(`.local`, `.test`, `.internal`, invented TLDs). Homelab setups use DuckDNS
+with Google OAuth routinely.
+
+**First, make the IP permanent.** Oracle hands out an *ephemeral* public IP by
+default, and it changes when the instance is stopped and started — which would
+silently break both DNS and the registered redirect URI. Reserving it is free:
+
+> Instance → Attached VNICs → primary VNIC → IPv4 Addresses → edit the public
+> IP → change **Ephemeral** to **Reserved**.
+
+**Then:**
+
+1. Go to <https://www.duckdns.org> and sign in (Google/GitHub — no password).
+2. Pick a subdomain, e.g. `stockradar-vk` → gives `stockradar-vk.duckdns.org`.
+3. Put the instance's reserved public IP in the **current ip** box and update.
+4. Confirm it resolves before going further:
+
+   ```bash
+   dig +short stockradar-vk.duckdns.org     # must print your instance IP
+   ```
+
+   DNS must be correct *before* Caddy starts, or the Let's Encrypt HTTP-01
+   challenge fails and you will burn attempts against the rate limit.
+
+With a reserved IP the record never needs updating. If you ever use an
+ephemeral IP instead, keep it current with a cron entry (token is on the
+DuckDNS dashboard):
+
+```bash
+*/5 * * * * curl -ks "https://www.duckdns.org/update?domains=stockradar-vk&token=<TOKEN>&ip=" >/dev/null
+```
+
+**If you later buy a domain,** nothing here changes except `APP_DOMAIN` and
+adding the new redirect URI in Google Console.
 
 ## 4. Install Docker and get the code
 
@@ -105,12 +137,15 @@ client → **Authorized redirect URIs** → Add:
 https://<APP_DOMAIN>/auth/callback
 ```
 
-It must match scheme, host, port and path **exactly**. Keep the existing
-`http://localhost:8000/auth/callback` entry so local development still works —
-a client can hold several.
+e.g. `https://stockradar-vk.duckdns.org/auth/callback`.
 
-This is also the moment the DuckDNS question answers itself: if the console
-accepts the URI, the hostname is fine.
+It must match scheme, host, port and path **exactly** — no trailing slash, and
+`https` not `http`. A mismatch produces `Error 400: redirect_uri_mismatch` at
+login, which is by far the most common failure here and is always an
+exact-string problem, not a domain problem.
+
+Keep the existing `http://localhost:8000/auth/callback` entry so local
+development still works — a client can hold several.
 
 ## 6. Configure
 

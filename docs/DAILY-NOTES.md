@@ -33,6 +33,11 @@ future you) can pick up without re-deriving context.
 | [DN-11](#dn-11) | 2026-10-24 | `.env` is the single config source; no backfill from any example file |
 | [DN-12](#dn-12) | 2026-10-24 | Defer Phase 6 — `master` stays unauthenticated **by choice** |
 | [DN-13](#dn-13) | 2026-10-25 | Secrets: revoke the leaked credential, don't rotate the live one; decline the history rewrite |
+| [DN-14](#dn-14) | 2026-10-25 | Keep a daily notes file in the repo, with a decision index |
+| [DN-15](#dn-15) | 2026-10-25 | Deploy to Oracle Always Free, not AWS — AWS micro RAM and 12-month expiry don't fit |
+| [DN-16](#dn-16) | 2026-10-25 | One HTTPS origin behind Caddy; drop the split-Vercel idea |
+| [DN-17](#dn-17) | 2026-10-25 | Build images on the instance instead of pulling from ghcr |
+| [DN-18](#dn-18) | 2026-10-25 | DuckDNS for the hostname; reserve the Oracle public IP |
 
 ---
 
@@ -64,11 +69,90 @@ scrub the dead string. A **revoked** credential in history is noise, not
 exposure, and the rewrite is disruptive for no security gain. Revisit only if
 the repo should be clean for its own sake.
 
+### <a id="dn-14"></a>DN-14 — Keep daily notes in the repo
+Started this file. It lives in the repo rather than in assistant memory so it
+is version-controlled and travels with the project; `CLAUDE.md` tells future
+sessions to read it at the start and append at the end. Motivated by two cases
+*that same day* where stale notes actively misled the work: the regime
+collector was recorded as a failing VIX fetch when it was key drift, and the
+Gmail item rested on a wrong premise about where the credential leaked.
+
+---
+
+## 2026-10-25 (later) — deployment setup
+
+Started deploying frontend + backend. Nothing is deployed yet; this is the
+repo-side groundwork plus the architecture decisions.
+
+### Shipped
+- `539349c` — `docker-compose.cloud.yml`, `Caddyfile`, `docs/DEPLOYMENT.md`,
+  cloud section in `.env.example`, and a `Dockerfile.backend` fix.
+
+### Found
+- **The container would have crashed on first boot.** `Dockerfile.backend` ran
+  `uvicorn backend.api:app` from `/app`, but `api.py` imports its siblings bare
+  (`from auth import ...`), which only resolves with `backend/` on `sys.path`.
+  Reproduced it — `ModuleNotFoundError: No module named 'auth'` — and fixed it
+  by launching from `backend/`, as the local run and `CLAUDE.md` already
+  describe. **Broken since Phase 1**; never noticed because the NAS deployment
+  was never run with the auth code. Would have surfaced on the instance as an
+  instant crashloop, easily misattributed to Oracle networking.
+- **Google will not accept the obvious deployment.** Redirect URIs must be
+  HTTPS and must not be raw IPs — localhost is the only exemption. So a
+  LAN-only NAS deployment cannot use Google OIDC at all, and a bare cloud IP
+  is equally unusable. TLS on a real hostname is mandatory, which drove
+  DN-16 and DN-18.
+- **The published images are unusable for this.** CI builds **amd64 only** and
+  triggers only on `master` — so the ghcr images are both the wrong
+  architecture for Ampere ARM64 and contain none of the OIDC code.
+
+### <a id="dn-15"></a>DN-15 — Oracle Always Free over AWS Free Tier
+AWS's EC2 free tier is 12 months and its micro instances are ~1 GB RAM; a
+2,000-symbol pandas/yfinance run would very likely exhaust that, and the clock
+runs out regardless. Oracle's Always Free Ampere allowance (up to 4 OCPU /
+24 GB) is indefinite and comfortably sized. Caveat recorded in the runbook: A1
+capacity is frequently exhausted, and the AMD micro fallback is 1 GB and not a
+substitute.
+
+### <a id="dn-16"></a>DN-16 — One HTTPS origin behind Caddy; no split Vercel frontend
+nginx already serves the SPA and proxies `/api` and `/auth`, so putting Caddy
+in front for TLS keeps everything on a single origin: `SameSite=lax`, no CORS,
+one redirect URI. A Vercel frontend would be a *different site* from the
+backend, forcing `SameSite=none` + `Secure` plus a CORS allow-list — more
+moving parts and a weaker cookie posture for no benefit. **This makes Vercel
+redundant for this project.** Caddy over nginx+certbot purely for automatic
+ACME including renewal.
+
+### <a id="dn-17"></a>DN-17 — Build on the instance, don't pull from ghcr
+Sidesteps both CI problems at once (amd64-only, master-only) with no workflow
+changes and no QEMU. `python:3.11-slim` is multi-arch and numpy/pandas/duckdb
+all ship aarch64 wheels, so nothing compiles. Publishing multi-arch images
+from CI is a sensible follow-up but a slow one — emulated ARM builds of a
+pandas image are expensive — so it should not block the first deploy.
+
+### <a id="dn-18"></a>DN-18 — DuckDNS for the hostname; reserve the Oracle IP
+No domain owned, and the deployment needs one. `yourname.duckdns.org` is free
+and satisfies Google's public-suffix rule either way: if `duckdns.org` is a PSL
+entry that is the suffix, otherwise the suffix is `.org`. Confirmed by
+homelab setups running Google OAuth against DuckDNS in practice; the failures
+reported there are `redirect_uri_mismatch`, an exact-string issue, not domain
+rejection.
+
+Paired requirement: **reserve the Oracle public IP** (free). The default is
+ephemeral and changes on stop/start, which would silently break DNS *and* the
+registered redirect URI.
+
 ### Open
-- Scheduler armed for **2026-10-26 09:15 IST** — still the one genuinely
-  unverified thing in the project. The July sleep-wake nudge fix (`ec4c043`)
-  has never been tested against a real slot, and only proves anything if the
-  laptop is awake around then.
+- Nothing is deployed yet. Instance, firewall (both layers), DuckDNS record,
+  redirect URI and `.env` are all still to do — see `docs/DEPLOYMENT.md`.
+- **Phase 6 becomes unblocked once this is proven.** DN-12 deferred the merge
+  to `master` for want of a production backend; this deployment is that
+  backend.
+- Deploying moots the scheduler sleep-freeze problem — an always-on VM does not
+  sleep, so the July nudge fix stops being load-bearing.
+- Scheduler on the laptop is armed for **2026-10-26 09:15 IST** — still the one
+  genuinely unverified thing in the project, and only meaningful if the laptop
+  is awake then.
 
 ---
 
