@@ -535,6 +535,73 @@ body::before {
 .trigger-btn:active { transform: translateY(0); }
 .trigger-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
 
+/* Auth — login / splash / backend-down screens */
+.auth-screen {
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background:
+    radial-gradient(900px 500px at 50% -10%, rgba(96,165,250,0.10), transparent 70%),
+    var(--bg-deep);
+}
+.auth-card {
+  width: 100%; max-width: 380px;
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  padding: 40px 32px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  text-align: center;
+}
+.auth-logo { font-size: 38px; line-height: 1; }
+.auth-title { font-family: var(--display); font-size: 24px; font-weight: 700; letter-spacing: -0.5px; }
+.auth-title span { color: var(--green); }
+.auth-sub { font-size: 13px; color: var(--text-2); }
+.auth-error {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 10px 12px;
+  background: var(--red-dim); color: var(--red);
+  border: 1px solid rgba(255,79,100,0.35); border-radius: 10px;
+  font-size: 12px; text-align: left;
+}
+.auth-code {
+  width: 100%; padding: 10px 12px;
+  background: rgba(0,0,0,0.4); border-radius: 8px;
+  font-family: var(--mono); font-size: 11px; color: var(--text-2);
+  word-break: break-all; text-align: left;
+}
+.auth-btn {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%; margin-top: 4px; padding: 12px 20px;
+  background: #fff; color: #1f2937;
+  border: none; border-radius: 10px;
+  font-family: inherit; font-size: 14px; font-weight: 600;
+  text-decoration: none; cursor: pointer;
+  transition: all 0.2s ease;
+}
+.auth-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 24px rgba(255,255,255,0.14); }
+.auth-btn:active { transform: translateY(0); }
+
+/* Signed-in user chip in the header */
+.user-chip { display: flex; align-items: center; gap: 6px; }
+.user-avatar {
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 1px solid var(--border); object-fit: cover; display: block;
+}
+.user-avatar-fallback {
+  display: flex; align-items: center; justify-content: center;
+  background: var(--blue-dim); color: var(--blue);
+  font-size: 12px; font-weight: 700; font-family: var(--mono);
+}
+.logout-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text-2); cursor: pointer;
+  transition: all 0.2s ease;
+}
+.logout-btn:hover { background: var(--red-dim); border-color: var(--red); color: var(--red); }
+
 /* Skeleton loading */
 .skeleton {
   border-radius: 14px;

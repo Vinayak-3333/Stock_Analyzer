@@ -1,0 +1,45 @@
+# Build context for Dockerfile.backend (context is the project root, so a bare
+# `COPY . .` would otherwise pull in everything below).
+#
+# The first block is the one that matters: without it the real .env — OIDC
+# client secret, Gmail app password, SESSION_SECRET — is baked into the image
+# layer, where it survives `docker history` and anything the image is later
+# pushed to. Config reaches the container through compose `environment:`, never
+# through a copied file.
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+.env.*
+**/.env
+**/.env.*
+
+# ── Git history ───────────────────────────────────────────────────────────────
+# Large, and carries the revoked-but-still-present app password from the 13
+# commits at Analyzer.py:59. No reason for it to be in a runtime image.
+.git
+.gitignore
+.github
+
+# ── Runtime data (bind-mounted/volume-mounted at /app/backend/data) ───────────
+backend/data
+
+# ── Frontend (built by its own image, not needed by the backend) ──────────────
+frontend
+
+# ── Python cruft ──────────────────────────────────────────────────────────────
+__pycache__
+**/__pycache__
+*.py[cod]
+.venv
+venv
+env
+.pytest_cache
+.mypy_cache
+
+# ── Local noise ───────────────────────────────────────────────────────────────
+graphify-out
+*.log
+nas-data
+docs
+*.md
+!requirements.txt

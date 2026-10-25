@@ -1,0 +1,117 @@
+# ── StockRadar IN — Tailscale Funnel deployment ───────────────────────────────
+#
+#   docker compose -f docker-compose.funnel.yml up -d --build
+#   tailscale funnel --bg 8080
+#
+# Funnel publishes https://<device>.<tailnet>.ts.net with a real certificate
+# Tailscale manages, so this file has no Caddy, no ACME, no open firewall ports
+# and no DNS record to maintain. It works behind CGNAT, which is what makes it
+# viable on a home connection where inbound ports are unreachable.
+#
+#   Internet --TLS--> Funnel --> nginx 127.0.0.1:8080 --> backend:8000
+#
+# Still a single origin, so the cookie story is unchanged from the Caddy setup:
+# SameSite=lax, no CORS, one redirect URI.
+#
+# Caveat worth knowing: this is only reachable while the machine is awake. A
+# sleeping laptop takes the site down AND freezes the APScheduler timers (the
+# problem ec4c043 exists to mitigate), so scheduled 09:15/15:30 IST runs are
+# best-effort here. Moving to an always-on host removes that entirely.
+#
+# Requires a .env beside this file. See .env.example (Tailscale Funnel section).
+
+services:
+  # ── Frontend: SPA + reverse proxy for /api and /auth ────────────────────────
+  stockradar-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+      args:
+        # Same-origin. App.jsx derives the /auth base by stripping /api, so a
+        # full URL here would make the deployment cross-site and invalidate the
+        # cookie flags below.
+        VITE_API_URL: /api
+    container_name: stockradar-frontend
+    restart: unless-stopped
+    ports:
+      # Bound to LOOPBACK ONLY, deliberately. Funnel reaches it over localhost;
+      # binding 0.0.0.0 would expose the dashboard unauthenticated to every
+      # device on whatever network the machine joins next.
+      - "127.0.0.1:${FUNNEL_PORT:-8080}:80"
+    environment:
+      - BACKEND_UPSTREAM=http://stockradar-backend:8000
+    depends_on:
+      - stockradar-backend
+    networks:
+      - stockradar-net
+
+  # ── Backend: FastAPI + APScheduler ──────────────────────────────────────────
+  stockradar-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: stockradar-backend
+    restart: unless-stopped
+    # No ports at all: reachable only from the frontend container.
+    volumes:
+      - backend_data:/app/backend/data      # SQLite runs + DuckDB lake + audit.log
+    environment:
+      # ── Email alerts ────────────────────────────────────────────────────────
+      - GMAIL_SENDER=${GMAIL_SENDER}
+      - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}
+      - RECIPIENT_EMAIL=${RECIPIENT_EMAIL}
+      # ── OIDC ────────────────────────────────────────────────────────────────
+      # APP_DOMAIN is your Funnel hostname, e.g. laptop.tail1234.ts.net
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
+      - OIDC_REDIRECT_URI=https://${APP_DOMAIN}/auth/callback
+      - FRONTEND_URL=https://${APP_DOMAIN}
+      - ALLOWED_EMAILS=${ALLOWED_EMAILS:-}
+      # ── Session ─────────────────────────────────────────────────────────────
+      - SESSION_SECRET=${SESSION_SECRET}
+      - SESSION_COOKIE_SAMESITE=lax
+      - SESSION_COOKIE_SECURE=true          # Funnel is HTTPS-only
+      - CORS_ALLOW_ORIGINS=https://${APP_DOMAIN}
+      # ── Hardening ───────────────────────────────────────────────────────────
+      # ON, and verified rather than assumed (2026-10-25, see DAILY-NOTES DN-20):
+      #   * with it off, audit.log recorded ip=172.19.0.3 — the nginx container,
+      #     i.e. every caller sharing one rate-limit bucket;
+      #   * with it on, a real public client IPv6 appeared, so Funnel does
+      #     forward X-Forwarded-For;
+      #   * a request carrying a forged `X-Forwarded-For: 203.0.113.99` was NOT
+      #     trusted — the real address was logged instead, so Tailscale
+      #     OVERWRITES the header rather than appending to a client-supplied
+      #     one. That is what makes trusting it safe here.
+      # The backend publishes no port, so the only path in is Funnel -> nginx.
+      - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-true}
+      - SECURITY_HSTS_ENABLED=true          # Funnel serves HTTPS only
+      - DOCS_ENABLED=${DOCS_ENABLED:-false}
+      # Rate limits. These were tunable in .env.example but never reached the
+      # container, so .env edits silently did nothing — the defaults applied.
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      - RATE_LIMIT_TRIGGER=${RATE_LIMIT_TRIGGER:-5}
+      - RATE_LIMIT_AUTH=${RATE_LIMIT_AUTH:-20}
+      - RATE_LIMIT_API=${RATE_LIMIT_API:-240}
+      # ── Pipeline tuning ─────────────────────────────────────────────────────
+      # All of these were documented as tunable but only two were passed
+      # through. TIER2_DEADLINE_MINUTES matters most on a weak host: it is a
+      # HARD wall-clock budget, and a run that exceeds it finishes with partial
+      # results rather than failing loudly.
+      - TIER2_WORKERS=${TIER2_WORKERS:-16}
+      - DEEP_ANALYSIS_COUNT=${DEEP_ANALYSIS_COUNT:-400}
+      - TIER2_DEADLINE_MINUTES=${TIER2_DEADLINE_MINUTES:-20}
+      - BULK_PARALLEL_CHUNKS=${BULK_PARALLEL_CHUNKS:-2}
+      - FUNDAMENTALS_CACHE_TTL_DAYS=${FUNDAMENTALS_CACHE_TTL_DAYS:-7}
+      - ANALYSIS_STALE_MINUTES=${ANALYSIS_STALE_MINUTES:-90}
+      # ── Python / locale ─────────────────────────────────────────────────────
+      - PYTHONUTF8=1
+      - TZ=Asia/Kolkata                     # scheduler fires 09:15 / 15:30 IST
+    networks:
+      - stockradar-net
+
+networks:
+  stockradar-net:
+    driver: bridge
+
+volumes:
+  backend_data:

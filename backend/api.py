@@ -21,27 +21,22 @@ os.environ.setdefault("PYTHONUTF8", "1")
 
 # ── Load .env from project root (backend is launched from backend/ subdir) ─────
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# `.env` is the single source of configuration. There used to be a backfill
+# from `.env.nas.example` for any key `.env` left empty, but that file is
+# gitignored and held real credentials, so an "example" file was silently
+# supplying production config. Everything it actually provided
+# (DEEP_ANALYSIS_COUNT, FUNDAMENTALS_CACHE_TTL_DAYS) already has an identical
+# default in code, so the backfill was removed rather than reimplemented.
 try:
-    from dotenv import load_dotenv, dotenv_values
-    _env_file    = _PROJECT_ROOT / ".env"
-    _env_example = _PROJECT_ROOT / ".env.nas.example"
+    from dotenv import load_dotenv
+    _env_file = _PROJECT_ROOT / ".env"
     if _env_file.exists():
         load_dotenv(dotenv_path=str(_env_file), override=False)
-    # Backfill any key that is still empty from .env.nas.example
-    if _env_example.exists():
-        for _k, _v in dotenv_values(str(_env_example)).items():
-            if _v and not os.environ.get(_k):
-                os.environ[_k] = _v
-    logging.getLogger("stockradar").info(
-        "Env loaded from %s (AV key present: %s, TD key present: %s)",
-        _env_file,
-        bool(os.environ.get("ALPHA_VANTAGE_API_KEY")),
-        bool(os.environ.get("TWELVE_DATA_API_KEY")),
-    )
+    logging.getLogger("stockradar").info("Env loaded from %s", _env_file)
 except Exception as _e:
     pass
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -56,6 +51,18 @@ from Analyzer import (
 from core.pipeline import get_modular_market_conditions, run_modular_analysis
 from core.lake.manager import close_lake
 from core.events.store import get_event_stats, get_recent_events
+
+# OIDC auth (Phase 1/2): imports cleanly even without Google credentials set.
+from auth import install_auth, require_csrf, require_user, OIDC_ENABLED
+# Hardening (Phase 4): security headers, rate limiting, /docs lockdown.
+from security import (
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+    TRUST_PROXY_HEADERS,
+    install_docs,
+    security_summary,
+)
+from audit import audit, client_ip
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -223,13 +230,11 @@ scheduler.add_job(analysis_job, CronTrigger(day_of_week="mon-fri", hour=15, minu
                   coalesce=True, misfire_grace_time=14400, max_instances=1)
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
-app = FastAPI(title="StockRadar IN API", version="2.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+# docs_url/redoc_url/openapi_url are disabled here and re-served by
+# security.install_docs() behind require_user (SR-8).
+app = FastAPI(
+    title="StockRadar IN API", version="2.0",
+    docs_url=None, redoc_url=None, openapi_url=None,
 )
 
 # Force no-cache on every API response — prevents browser from serving stale stock data
@@ -241,7 +246,52 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
         response.headers["Expires"]        = "0"
         return response
 
+
+# ── Middleware stack ───────────────────────────────────────────────────────────
+# Starlette runs the LAST-added middleware outermost, so the order below is
+# deliberate and reads bottom-up. The resulting chain is:
+#
+#     CORS → SecurityHeaders → NoCache → Session → RateLimit → routes
+#
+# Two constraints drive it:
+#   • RateLimit must be INSIDE Session — it reads request.session to give a
+#     logged-in user their own budget instead of sharing one per IP.
+#   • CORS must be OUTERMOST so a 401/403/429 raised by an inner middleware
+#     still carries CORS headers. Before Phase 4 CORS was added first (making
+#     it innermost), which meant any such error reached the browser as an
+#     opaque "Network Error" with the real status invisible.
+
+# 1. innermost — rate limiting (SR-6), plus the authenticated /docs routes (SR-8)
+app.add_middleware(RateLimitMiddleware)
+install_docs(app)
+
+# 2. session cookie + /auth/{login,callback,logout,me}
+install_auth(app)
+log.info("Auth wired (OIDC enabled: %s)", OIDC_ENABLED)
+
+# 3. cache suppression
 app.add_middleware(NoCacheMiddleware)
+
+# 4. security response headers (SR-4)
+app.add_middleware(SecurityHeadersMiddleware)
+
+# 5. outermost — CORS (SR-2): explicit origin allow-list + credentials so the
+# browser will send/accept the session cookie. A "*" origin is illegal with
+# credentials. Configure prod origins via CORS_ALLOW_ORIGINS (comma-separated).
+_cors_raw   = os.environ.get("CORS_ALLOW_ORIGINS") or os.environ.get("FRONTEND_URL", "http://localhost:5173")
+CORS_ORIGINS = [o.strip().rstrip("/") for o in _cors_raw.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    # Cache-Control is required: the dashboard sends it on its polling GETs,
+    # which makes them non-simple requests — omitting it here 400s the
+    # preflight and the SPA sees an opaque "Network Error".
+    allow_headers=["Content-Type", "X-CSRF-Token", "Authorization", "Cache-Control"],
+)
+
+log.info("Security posture: %s", security_summary())
 
 
 @app.on_event("startup")
@@ -286,8 +336,21 @@ def on_shutdown():
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+# Phase 2: every /api/* route below requires a valid session via
+# Depends(require_user) — EXCEPT /api/health, which stays public so the Docker
+# healthchecks (docker-compose.nas.yml, Dockerfile.backend) can probe it
+# unauthenticated. /auth/* routes are mounted separately and are intentionally
+# public (they ARE the login path).
+# Phase 3: state-changing routes also take Depends(require_csrf), which demands
+# an X-CSRF-Token header matching the session token.
 
-@app.get("/api/status")
+@app.get("/api/health")
+def health():
+    """Public, unauthenticated liveness probe. Used by Docker healthchecks."""
+    return {"status": "ok"}
+
+
+@app.get("/api/status", dependencies=[Depends(require_user)])
 def status():
     """Scheduler status, running flag, next scheduled runs."""
     jobs = []
@@ -309,7 +372,7 @@ def status():
     }
 
 
-@app.get("/api/latest")
+@app.get("/api/latest", dependencies=[Depends(require_user)])
 def latest():
     """Most recent analysis run with full stock results."""
     with get_db() as conn:
@@ -325,7 +388,7 @@ def latest():
     return JSONResponse(payload)
 
 
-@app.get("/api/history")
+@app.get("/api/history", dependencies=[Depends(require_user)])
 def history(limit: int = 20):
     """List of past runs (without full results for performance)."""
     with get_db() as conn:
@@ -338,7 +401,7 @@ def history(limit: int = 20):
     return JSONResponse(sanitize_floats([dict(r) for r in rows]))
 
 
-@app.get("/api/runs/{run_id}")
+@app.get("/api/runs/{run_id}", dependencies=[Depends(require_user)])
 def get_run(run_id: int):
     """Full results for a specific historical run."""
     with get_db() as conn:
@@ -351,16 +414,29 @@ def get_run(run_id: int):
     return JSONResponse(sanitize_floats(d))
 
 
-@app.post("/api/trigger")
-def trigger(background_tasks: BackgroundTasks, email: bool = True):
-    """Manually trigger analysis (runs in background)."""
+# Dependency order matters: require_user must come first so an anonymous caller
+# gets 401 (which the SPA turns into a login redirect) rather than a misleading
+# 403 about a CSRF token they were never going to have.
+@app.post("/api/trigger", dependencies=[Depends(require_user), Depends(require_csrf)])
+def trigger(request: StarletteRequest, background_tasks: BackgroundTasks, email: bool = True):
+    """Manually trigger analysis (runs in background).
+
+    The privileged endpoint (SR-1): it burns Yahoo/NSE quota and sends mail, so
+    every call is audited with the identity behind it (SR-9).
+    """
+    who = (request.session.get("user") or {}).get("email")
+    ip  = client_ip(request, TRUST_PROXY_HEADERS)
+
     if _run_is_active():
+        audit("trigger.rejected", identity=who, ip=ip, reason="already_running")
         return {"status": "already_running", "message": "Analysis already in progress"}
+
+    audit("trigger.accepted", identity=who, ip=ip, email=email)
     background_tasks.add_task(analysis_job, send_email=email)
     return {"status": "triggered", "message": "Analysis started in background"}
 
 
-@app.get("/api/market")
+@app.get("/api/market", dependencies=[Depends(require_user)])
 def market():
     """Live market conditions (fetched fresh on demand)."""
     try:
@@ -370,13 +446,13 @@ def market():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/events")
+@app.get("/api/events", dependencies=[Depends(require_user)])
 def events(limit: int = 100, stage: Optional[str] = None, symbol: Optional[str] = None):
     """Recent event-driven pipeline events."""
     return JSONResponse(sanitize_floats(get_recent_events(limit=limit, stage=stage, symbol=symbol)))
 
 
-@app.get("/api/factor-ic")
+@app.get("/api/factor-ic", dependencies=[Depends(require_user)])
 def factor_ic(days: int = 90):
     """
     Factor information-coefficient report: how well each scoring factor
@@ -391,14 +467,14 @@ def factor_ic(days: int = 90):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/fetch-stats")
+@app.get("/api/fetch-stats", dependencies=[Depends(require_user)])
 def fetch_stats():
     """Per-host fetch-engine metrics: calls, errors, retries, breaker state."""
     from core.fetch import get_engine
     return JSONResponse(sanitize_floats(get_engine().stats()))
 
 
-@app.get("/api/events/status")
+@app.get("/api/events/status", dependencies=[Depends(require_user)])
 def events_status():
     """Event bus/lake health and per-stage counts."""
     stats = get_event_stats()

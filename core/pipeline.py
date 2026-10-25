@@ -38,7 +38,6 @@ try:
 except Exception:
     pass
 
-from core.collectors.market_data import collect_keyed_quotes
 from core.collectors.nse import (
     _UA,
     _make_session,

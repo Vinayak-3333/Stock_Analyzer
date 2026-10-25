@@ -22,13 +22,20 @@ COPY . .
 # Persistent data directory (mount a NAS volume here)
 RUN mkdir -p /app/backend/data
 
-# Health check — hits /api/status
+# Health check — hits /api/health (public; /api/status now requires auth)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD curl -f http://localhost:8000/api/status || exit 1
+    CMD curl -f http://localhost:8000/api/health || exit 1
 
 EXPOSE 8000
 
-# Run from backend/ so relative imports (Analyzer.py in parent) still resolve
-CMD ["python", "-m", "uvicorn", "backend.api:app", \
+# Launch from backend/, exactly as the local run and CLAUDE.md describe.
+# This is load-bearing: api.py imports its siblings bare (`from auth import ...`,
+# `from security import ...`), which only resolves when backend/ is on sys.path.
+# Running `uvicorn backend.api:app` from /app instead crashes at import with
+# "No module named 'auth'". api.py puts the project root on sys.path itself, so
+# core/ and Analyzer.py still resolve from here.
+WORKDIR /app/backend
+
+CMD ["python", "-m", "uvicorn", "api:app", \
      "--host", "0.0.0.0", "--port", "8000", \
      "--workers", "1", "--no-access-log"]
