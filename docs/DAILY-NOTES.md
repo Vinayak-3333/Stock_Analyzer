@@ -45,6 +45,93 @@ future you) can pick up without re-deriving context.
 | [DN-23](#dn-23) | 2026-10-25 | Phase 6 — merged `alt-approach` to `master`; `master` is no longer unauthenticated |
 | [DN-24](#dn-24) | 2026-10-26 | Download each symbol's Yahoo history once; quotes come from the 1y frame |
 | [DN-25](#dn-25) | 2026-10-26 | Store FII/DII every run, keyed by NSE's trading date, not `date.today()` |
+| [DN-26](#dn-26) | 2026-10-27 | Kubernetes on a separate k3s lab VM; the live VM is not touched until cutover |
+| [DN-27](#dn-27) | 2026-10-27 | Lab backend strips the scheduler at startup and has no Gmail secret, rather than a code flag or a custom image |
+
+---
+
+## 2026-10-27
+
+Started the Kubernetes track on a new VM, ran the app there, and the first lab
+run exposed a bug in yesterday's DN-24 fix that would have shrunk the live
+09:15 run to ~350 stocks. Fixed and deployed before the run. Work was done
+between ~00:30 and ~02:05 IST.
+
+### Shipped
+| Commit | What |
+|---|---|
+| — | **New VM `stockradar-k8s`** (`e2-medium`, 2 vCPU / 4 GB, 40 GB `pd-balanced`, Ubuntu 24.04, `asia-south1-c`), on trial credit. Tailscale `100.78.101.61` / `stockradar-k8s.tail7679a0.ts.net`; k3s `v1.36.5+k3s1` (single node, Traefik + local-path) |
+| `7731acd` | `deploy/k8s/lab/` — Kustomize manifests: backend (1 replica, `Recreate`, 5 Gi local-path PVC), frontend (2 replicas), Traefik ingress, namespace `stockradar` |
+| `cff2b5f` | Lenient backend probes (liveness 10 × 30 s) so a CPU-bound run isn't restarted mid-way |
+| `8d5ede0` | **Fix:** quote supplementary symbols from the last row that has a Close (see Found) |
+| `8916899` | Merged to `master`; CI run `40394708363` green; **live VM backend updated ~01:58 IST** (image `26785ec5`) — fix confirmed in the container, 09:15/15:30 jobs armed, public health OK, `/auth/me` 401. Frontend not restarted |
+
+Lab access: `https://stockradar-k8s.tail7679a0.ts.net` (tailnet only, via
+`tailscale serve` → Traefik :80). Laptop `kubectl` v1.37.1 (winget) with
+`~/.kube/config` context `stockradar-k8s`; Docker Desktop's v1.34 is shadowed
+by `~/bin/kubectl` (Git Bash) and an alias in the PowerShell profile. Google
+login: added the lab redirect URI to the OAuth client, which lives in GCP
+project **`sigma-sector-481906-p8`**, not `stock-radar-512711` (a client ID
+starts with its owning project's number).
+
+### Found
+- **DN-24 bug: the Yahoo supplement collapsed to 4 symbols.** Multi-ticker
+  `yf.download` now ends each frame with a row that has Volume but a **NaN
+  Close** (here: 26 Oct, fetched at 01:30 IST). `_quote_from_history` read that
+  row and returned `None`, so 1,450 downloaded histories gave 4 quotes and the
+  universe was 357 instead of 2,000. DN-24's 100-symbol check passed because
+  it ran in daytime, when the last row was complete. Fix drops NaN-Close rows
+  first: 10-symbol live check 0/10 → 10/10. Side effect: when the newest row
+  is blank, the quote is one session old for supplement symbols.
+- **The live VM never ran with the bug.** It was deployed 22:03 on 26 Oct and
+  fixed ~01:58 on 27 Oct, with no scheduled run in between.
+- **"Email sent" is logged unconditionally.** `send_gmail` swallows SMTP
+  errors and reports via `print` (buffered in the container), so the log
+  claimed an email for the lab run although the pod has no Gmail credentials.
+  Checked inside the pod: no `GMAIL_*` vars, no `/app/.env`. Not fixed.
+- Lab run (01:30–01:37 IST, 357-symbol universe): 7m17s, peak 345 Mi, no
+  restarts. **Not comparable** with the VM's 39 min because of the bug above.
+- NSE (live quotes, bhavcopy, FII/DII) answers from the GCP VM's address —
+  it wasn't certain a cloud IP would be allowed.
+- k3s's API (6443) listens on all interfaces. The GCP default firewall blocks
+  it publicly (checked: timeout on the external IP; `401` over Tailscale), but
+  `default-allow-internal` lets other VMs in the VPC reach it. Accepted for a lab.
+- Traefik's Helm install fails twice on first boot, then succeeds — normal.
+
+### <a id="dn-26"></a>DN-26 — Kubernetes on a separate k3s lab VM
+The user's rule: **don't disturb the live deployment, its scheduler or its
+analysis** until the Kubernetes setup is complete. So the cluster gets its own
+VM, nothing project-wide changes (no firewall, network or IAM edits), and it is
+reachable only over the tailnet (`tailscale serve`, never Funnel).
+
+k3s on one `e2-medium` rather than GKE Autopilot: the same manifests, no
+control-plane or load-balancer charge, and 4 GB is enough room for a run
+without swap. About ₹2,300/month of trial credit; stopping the VM leaves only
+the disk charge. Scaling the backend still waits on Phase 0 of the plan: move
+the scheduler out to a CronJob and the shared tables to Postgres. DuckDB's
+single writer and the in-process APScheduler both forbid a second replica.
+
+### <a id="dn-27"></a>DN-27 — Lab backend: scheduler stripped, no Gmail secret
+`api.py` has no switch for the scheduler. The lab overrides the container
+command to replace `BaseScheduler.add_job` with a no-op before importing the
+app, so it starts with `jobs: []` (checked in the log after every restart).
+This avoids a code change and, more importantly, a custom image: CI tags only
+`:latest`, the tag the live VM pulls. The secret has OIDC + session + the
+allow-list only, so even a manual lab run can't email. Lab-only; the real fix
+is a `SCHEDULER_ENABLED` flag or the CronJob split.
+
+### Open
+- **Check 09:15 on the live VM** — the first run with all three fixes:
+  `Yahoo quotes from history` should be ~1,400+/1,647, universe ~2,000; run
+  time vs the ~29 min estimate; `FII/DII window has N of 3`.
+- Re-run the lab with the fixed image for a real 2,000-symbol timing and peak
+  memory on 4 GB.
+- **Tailscale key expiry** for `stockradar-k8s` (expires 2027-04-24) — disable
+  in the admin console. The user's action.
+- `alt-approach` notes commit for this entry needs pushing; `master` lags by it.
+- Phase 0 of the Kubernetes plan (scheduler → CronJob, shared tables →
+  Postgres, run lock) when the user wants to continue.
+- Make "Email sent" reflect the real outcome (have `send_gmail` return a bool).
 
 ---
 
