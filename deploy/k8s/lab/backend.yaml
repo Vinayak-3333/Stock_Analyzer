@@ -1,0 +1,110 @@
+# ── Backend: FastAPI (scheduler disabled for the lab) ─────────────────────────
+
+# SQLite runs + DuckDB lake + audit.log. local-path is k3s's built-in
+# provisioner: a directory on the node's disk, so this pins the pod to the node.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backend-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stockradar-backend
+  labels: { app: stockradar-backend }
+spec:
+  # ONE replica, and Recreate rather than RollingUpdate: DuckDB allows a
+  # single writer, and APScheduler would double-fire with two copies. Both
+  # are Phase 0 work in the Kubernetes plan; until then this cannot scale.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: stockradar-backend }
+  template:
+    metadata:
+      labels: { app: stockradar-backend }
+    spec:
+      containers:
+        - name: backend
+          image: ghcr.io/vinayak-3333/stock-analyzer-backend:latest
+          imagePullPolicy: Always
+          workingDir: /app/backend
+          # The image's CMD with one change: add_job is made a no-op before
+          # api.py is imported, so the scheduler starts with no jobs. The
+          # startup log shows "jobs: []". Lab-only — the real fix is a
+          # SCHEDULER_ENABLED flag or a CronJob (plan Phase 0).
+          command:
+            - python
+            - -c
+            - |
+              import apscheduler.schedulers.base as b
+              b.BaseScheduler.add_job = lambda self, *a, **k: None
+              import uvicorn
+              uvicorn.run("api:app", host="0.0.0.0", port=8000, workers=1, access_log=False)
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: stockradar-secrets
+          env:
+            - { name: APP_DOMAIN, value: stockradar-k8s.tail7679a0.ts.net }
+            - { name: OIDC_REDIRECT_URI, value: "https://$(APP_DOMAIN)/auth/callback" }
+            - { name: FRONTEND_URL, value: "https://$(APP_DOMAIN)" }
+            - { name: CORS_ALLOW_ORIGINS, value: "https://$(APP_DOMAIN)" }
+            - { name: SESSION_COOKIE_SAMESITE, value: lax }
+            - { name: SESSION_COOKIE_SECURE, value: "true" }   # tailscale serve is HTTPS
+            # Three proxies (tailscale serve, Traefik, nginx) and no evidence
+            # yet of how they combine X-Forwarded-For — off until verified the
+            # way DN-20 verified Funnel. One user, so a shared bucket is fine.
+            - { name: TRUST_PROXY_HEADERS, value: "false" }
+            - { name: SECURITY_HSTS_ENABLED, value: "true" }
+            - { name: DOCS_ENABLED, value: "false" }
+            - { name: TIER2_WORKERS, value: "4" }
+            - { name: DEEP_ANALYSIS_COUNT, value: "400" }
+            - { name: TIER2_DEADLINE_MINUTES, value: "20" }
+            - { name: BULK_PARALLEL_CHUNKS, value: "2" }
+            - { name: FUNDAMENTALS_CACHE_TTL_DAYS, value: "7" }
+            - { name: ANALYSIS_STALE_MINUTES, value: "90" }
+            - { name: PYTHONUTF8, value: "1" }
+            - { name: TZ, value: Asia/Kolkata }
+          volumeMounts:
+            - name: data
+              mountPath: /app/backend/data
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits:   { memory: 2560Mi }   # a full run peaks well above idle
+          startupProbe:
+            httpGet: { path: /api/health, port: 8000 }
+            periodSeconds: 5
+            failureThreshold: 36            # up to 3 min for first start
+          readinessProbe:
+            httpGet: { path: /api/health, port: 8000 }
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: { path: /api/health, port: 8000 }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 4
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: backend-data
+---
+# Named to match the image's default BACKEND_UPSTREAM
+# (http://stockradar-backend:8000), so the frontend needs no override.
+apiVersion: v1
+kind: Service
+metadata:
+  name: stockradar-backend
+spec:
+  selector: { app: stockradar-backend }
+  ports:
+    - port: 8000
+      targetPort: 8000

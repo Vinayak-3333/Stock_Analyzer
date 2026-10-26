@@ -1,0 +1,31 @@
+# ── StockRadar IN — k3s lab cluster (stockradar-k8s VM) ───────────────────────
+#
+#   kubectl apply -k deploy/k8s/lab
+#
+# A learning cluster that runs ALONGSIDE the live `stockradar` VM, never
+# instead of it. Two rules keep it from interfering:
+#
+#   * No scheduler. The backend starts with the 09:15/15:30 jobs stripped
+#     (see backend.yaml), so only the live VM runs and emails the analysis.
+#   * No Gmail credentials. The secret below has none, so even a manual run
+#     triggered from the lab dashboard cannot send mail.
+#
+# Reached over the tailnet only, never Funnel:
+#
+#   tailnet --HTTPS--> tailscale serve (on the VM) --> Traefik :80
+#           --> frontend (nginx) --> backend :8000
+#
+# The secret is created by hand, not committed:
+#
+#   kubectl -n stockradar create secret generic stockradar-secrets \
+#     --from-literal=OIDC_CLIENT_ID=... --from-literal=OIDC_CLIENT_SECRET=... \
+#     --from-literal=SESSION_SECRET=... --from-literal=ALLOWED_EMAILS=...
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: stockradar
+resources:
+  - namespace.yaml
+  - backend.yaml
+  - frontend.yaml
+  - ingress.yaml
