@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>:root{color-scheme:light}body{margin:0;font:14px system-ui,-apple-system,"Segoe UI",sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
+<title>StockRadar Data Flow</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,500..800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one reading column for prose, full-bleed wide figures that scroll sideways on phones.
+   Color encodes where a box lives: blue = outside the VM, green = storage, marigold = a problem. */
+:root {
+  --bg: #F1F3F6;
+  --surface: #FFFFFF;
+  --ink: #17202B;
+  --muted: #586473;
+  --line: #C6CDD7;
+  --accent: #B35A00;
+  --accent-soft: #FBE5CC;
+  --ext: #2C5DA6;
+  --ext-soft: #DDE7F6;
+  --store: #1C7660;
+  --store-soft: #D5EDE5;
+  --cpu-soft: #E2E6EC;
+  --font-display: "Archivo", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0E131A;
+    --surface: #161D27;
+    --ink: #E5EAF1;
+    --muted: #97A2B1;
+    --line: #2E3846;
+    --accent: #F2A24E;
+    --accent-soft: #46290C;
+    --ext: #8FB5F0;
+    --ext-soft: #1B2A42;
+    --store: #6DCBAF;
+    --store-soft: #12362D;
+    --cpu-soft: #252D39;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0E131A;
+  --surface: #161D27;
+  --ink: #E5EAF1;
+  --muted: #97A2B1;
+  --line: #2E3846;
+  --accent: #F2A24E;
+  --accent-soft: #46290C;
+  --ext: #8FB5F0;
+  --ext-soft: #1B2A42;
+  --store: #6DCBAF;
+  --store-soft: #12362D;
+  --cpu-soft: #252D39;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 1240px; margin: 0 auto; padding-block: 48px 72px; display: grid; gap: 64px; }
+.prose { max-width: 68ch; }
+
+header { display: grid; gap: 16px; }
+.eyebrow {
+  font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted);
+}
+h1, h2 {
+  font-family: var(--font-display); font-stretch: 82%; font-weight: 750;
+  line-height: 1.08; text-wrap: balance; margin: 0;
+}
+h1 { font-size: clamp(34px, 5.4vw, 58px); letter-spacing: -0.01em; }
+h2 { font-size: clamp(24px, 3vw, 32px); }
+h3 { font-size: 15px; font-weight: 600; margin: 0; }
+p { margin: 0; }
+.lede { font-size: 18px; color: var(--muted); max-width: 64ch; }
+code, .mono { font-family: var(--font-mono); font-size: 0.88em; }
+
+.facts { display: flex; flex-wrap: wrap; gap: 12px 40px; margin: 8px 0 0; padding: 0; }
+.facts div { display: grid; gap: 2px; }
+.facts dt { font-size: 12px; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+.facts dd { margin: 0; font-family: var(--font-display); font-stretch: 85%; font-weight: 650; font-size: 22px; font-variant-numeric: tabular-nums; }
+
+section { display: grid; gap: 20px; }
+.section-head { display: grid; gap: 8px; }
+.section-head p { color: var(--muted); max-width: 68ch; }
+
+figure { margin: 0; display: grid; gap: 12px; }
+.canvas {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+  overflow-x: auto; padding: 12px;
+}
+.canvas svg { display: block; width: 100%; min-width: 920px; height: auto; }
+figcaption { font-size: 14px; color: var(--muted); max-width: 80ch; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.sw { width: 14px; height: 14px; border-radius: 2px; border: 1px solid; }
+.sw.ext { background: var(--ext-soft); border-color: var(--ext); }
+.sw.store { background: var(--store-soft); border-color: var(--store); }
+.sw.cpu { background: var(--cpu-soft); border-color: var(--line); }
+.sw.warn { background: var(--accent-soft); border-color: var(--accent); }
+
+/* SVG vocabulary */
+.box { fill: var(--surface); stroke: var(--line); }
+.box-stage { fill: var(--surface); stroke: var(--ink); stroke-width: 1.4; }
+.box-ext { fill: var(--ext-soft); stroke: var(--ext); }
+.box-store { fill: var(--store-soft); stroke: var(--store); }
+.box-chip { fill: var(--surface); stroke: var(--store); }
+.box-warn { fill: var(--accent-soft); stroke: var(--accent); stroke-dasharray: 4 3; }
+.box-dash { fill: var(--surface); stroke: var(--muted); stroke-dasharray: 4 3; }
+.seg-fetch { fill: var(--ext-soft); stroke: var(--ext); }
+.seg-cpu { fill: var(--cpu-soft); stroke: var(--muted); }
+.seg-dup { fill: var(--accent-soft); stroke: var(--accent); }
+.track { fill: var(--cpu-soft); }
+.bar { fill: var(--ext); }
+.t { fill: var(--ink); font-family: var(--font-body); font-size: 11.5px; }
+.tt { fill: var(--ink); font-family: var(--font-body); font-size: 13px; font-weight: 600; }
+.tm { fill: var(--muted); font-family: var(--font-body); font-size: 11.5px; }
+.tc { fill: var(--ink); font-family: var(--font-mono); font-size: 11px; }
+.tcm { fill: var(--muted); font-family: var(--font-mono); font-size: 11px; }
+.ta { fill: var(--accent); font-family: var(--font-body); font-size: 11.5px; font-weight: 600; }
+.tsig { fill: var(--ink); font-family: var(--font-body); font-size: 22px; }
+.edge { stroke: var(--muted); stroke-width: 1.4; fill: none; }
+.edge-accent { stroke: var(--accent); stroke-width: 2; fill: none; stroke-dasharray: 6 4; }
+.axis { stroke: var(--line); stroke-width: 1; }
+.ah { fill: var(--muted); }
+.ah-accent { fill: var(--accent); }
+
+/* Tables and the record */
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 24px; align-items: start; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 20px; display: grid; gap: 12px; }
+.panel > p { font-size: 14px; color: var(--muted); }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 8px 12px 8px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+td code { color: var(--ink); }
+tr.warn td:first-child code { color: var(--accent); }
+.dim { color: var(--muted); }
+pre.record {
+  margin: 0; overflow-x: auto; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6;
+  background: var(--bg); border-radius: 4px; padding: 16px; color: var(--ink);
+}
+pre.record .c { color: var(--muted); }
+
+.findings { display: grid; gap: 16px; padding: 0; margin: 0; list-style: none; }
+.findings li {
+  display: grid; grid-template-columns: auto 1fr; gap: 6px 16px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px;
+}
+.pill {
+  grid-row: span 2; align-self: start; font-family: var(--font-mono); font-size: 11px; font-weight: 500;
+  letter-spacing: 0.04em; text-transform: uppercase; padding: 3px 8px; border-radius: 3px; white-space: nowrap;
+  border: 1px solid;
+}
+.pill.fixed { color: var(--store); border-color: var(--store); background: var(--store-soft); }
+.pill.bug { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.pill.info { color: var(--muted); border-color: var(--line); background: var(--bg); }
+.findings p { font-size: 15px; color: var(--muted); max-width: 80ch; }
+footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 16px; }
+@media (max-width: 520px) {
+  .findings li { grid-template-columns: 1fr; }
+  .pill { grid-row: auto; justify-self: start; }
+}
+</style>
+</head>
+<body>
+
+
+<main class="wrap">
+  <header>
+    <div class="eyebrow">StockRadar IN · architecture</div>
+    <h1>How a run gathers its data</h1>
+    <p class="lede">Twice every weekday the backend pulls quotes and history for about 2,000 NSE stocks, screens them cheaply, studies the best 400 in depth, and sends you a ranked list. This page maps where each piece of data comes from, what happens to it, and where it ends up.</p>
+    <dl class="facts">
+      <div><dt>Schedule</dt><dd>09:15 · 15:30 IST</dd></div>
+      <div><dt>Funnel</dt><dd>2,000 → 400</dd></div>
+      <div><dt>Last run</dt><dd>38m 55s</dd></div>
+      <div><dt>Score factors</dt><dd>6</dd></div>
+    </dl>
+  </header>
+
+  <section>
+    <div class="section-head">
+      <h2>The whole run</h2>
+      <p>Sources sit across the top, the five pipeline stages run left to right through the middle, and the stores sit underneath. Times are from this morning's 09:15 run on the GCP VM.</p>
+    </div>
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 1200 660" role="img" aria-label="Pipeline map: NSE and Yahoo feed a five-stage run (stock list, regime, Tier 1 screen, Tier 2 deep analysis, deliver) that writes to a DuckDB lake and a SQLite runs table, emails results and serves the dashboard. Yahoo is downloaded twice for the same 1,698 stocks.">
+          <defs>
+            <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="a1x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-accent" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+
+          <!-- Sources -->
+          <rect class="box-dash" x="24" y="40" width="150" height="92" rx="4"/>
+          <text class="tt" x="36" y="64">You</text>
+          <text class="tm" x="36" y="84">“Run now” on the</text>
+          <text class="tm" x="36" y="100">dashboard</text>
+
+          <rect class="box-ext" x="218" y="40" width="150" height="92" rx="4"/>
+          <text class="tt" x="230" y="64">NSE</text>
+          <text class="t" x="230" y="84">live quotes, 21 indices</text>
+          <text class="t" x="230" y="100">bhavcopy (prev. day)</text>
+          <text class="t" x="230" y="116">equity list CSV</text>
+
+          <rect class="box-ext" x="412" y="40" width="150" height="92" rx="4"/>
+          <text class="tt" x="424" y="64">Yahoo · market</text>
+          <text class="tc" x="424" y="84">^NSEI ^INDIAVIX</text>
+          <text class="t" x="424" y="100">crude, USD/INR,</text>
+          <text class="t" x="424" y="116">S&amp;P 500, US 10Y</text>
+
+          <rect class="box-ext" x="606" y="40" width="150" height="92" rx="4"/>
+          <text class="tt" x="618" y="64">Yahoo · bulk</text>
+          <text class="tc" x="618" y="84">yf.download</text>
+          <text class="t" x="618" y="100">100 stocks per call</text>
+          <text class="t" x="618" y="116">2 calls at a time</text>
+
+          <rect class="box-ext" x="800" y="40" width="150" height="92" rx="4"/>
+          <text class="tt" x="812" y="64">Per-stock sources</text>
+          <text class="t" x="812" y="84">Yahoo company, news</text>
+          <text class="t" x="812" y="100">NSE FII/DII, options</text>
+          <text class="t" x="812" y="116">Google News, ET RSS</text>
+
+          <rect class="box-ext" x="994" y="40" width="150" height="92" rx="4"/>
+          <text class="tt" x="1006" y="64">Gmail SMTP</text>
+          <text class="t" x="1006" y="84">sends to your inbox</text>
+
+          <!-- Source → stage edges -->
+          <line class="edge" x1="99" y1="132" x2="99" y2="238" marker-end="url(#a1)"/>
+          <text class="tm" x="105" y="178">POST</text>
+          <text class="tcm" x="105" y="194">/api/trigger</text>
+
+          <line class="edge" x1="293" y1="132" x2="293" y2="238" marker-end="url(#a1)"/>
+          <text class="tm" x="299" y="170">quotes, symbol lists</text>
+
+          <line class="edge" x1="487" y1="132" x2="487" y2="238" marker-end="url(#a1)"/>
+          <text class="tm" x="493" y="170">index history</text>
+
+          <line class="edge" x1="681" y1="132" x2="681" y2="238" marker-end="url(#a1)"/>
+          <text class="tm" x="687" y="170">1y daily × 2,000</text>
+
+          <path class="edge-accent" d="M630 132 V212 H330 V238" marker-end="url(#a1x)"/>
+          <text class="ta" x="562" y="204" text-anchor="middle">5d × 1,698 · duplicate</text>
+
+          <line class="edge" x1="875" y1="132" x2="875" y2="238" marker-end="url(#a1)"/>
+          <text class="tm" x="881" y="170">≈10 calls per stock</text>
+
+          <line class="edge" x1="1069" y1="238" x2="1069" y2="134" marker-end="url(#a1)"/>
+          <text class="tm" x="1075" y="190">top picks email</text>
+
+          <!-- Stages -->
+          <rect class="box-stage" x="24" y="240" width="150" height="140" rx="4"/>
+          <text class="tt" x="36" y="264">Trigger</text>
+          <text class="t" x="36" y="286">APScheduler cron</text>
+          <text class="t" x="36" y="302">Mon–Fri 09:15</text>
+          <text class="t" x="36" y="318">and 15:30 IST</text>
+          <text class="tc" x="36" y="344">analysis_job()</text>
+          <text class="tcm" x="36" y="368">fired 09:15:02</text>
+
+          <rect class="box-stage" x="218" y="240" width="150" height="140" rx="4"/>
+          <text class="tt" x="230" y="264">1 · Stock list</text>
+          <text class="t" x="230" y="286">353 NSE live quotes</text>
+          <text class="t" x="230" y="302">+ bhavcopy symbols,</text>
+          <text class="t" x="230" y="318">ETFs filtered out</text>
+          <text class="tt" x="230" y="344">→ 2,000 stocks</text>
+          <text class="tcm" x="230" y="368">11m 28s</text>
+
+          <rect class="box-stage" x="412" y="240" width="150" height="140" rx="4"/>
+          <text class="tt" x="424" y="264">2 · Regime</text>
+          <text class="t" x="424" y="286">NIFTY trend, VIX,</text>
+          <text class="t" x="424" y="302">macro, sector</text>
+          <text class="t" x="424" y="318">breadth</text>
+          <text class="tt" x="424" y="344">→ NEUTRAL</text>
+          <text class="tcm" x="424" y="368">14s</text>
+
+          <rect class="box-stage" x="606" y="240" width="150" height="140" rx="4"/>
+          <text class="tt" x="618" y="264">3 · Tier 1 screen</text>
+          <text class="t" x="618" y="286">technical score on</text>
+          <text class="t" x="618" y="302">1y daily history;</text>
+          <text class="t" x="618" y="318">1,798 had ≥ 60 days</text>
+          <text class="tt" x="618" y="344">→ top 400</text>
+          <text class="tcm" x="618" y="368">18m 22s</text>
+
+          <rect class="box-stage" x="800" y="240" width="150" height="140" rx="4"/>
+          <text class="tt" x="812" y="264">4 · Tier 2 deep</text>
+          <text class="t" x="812" y="286">full 6-factor score</text>
+          <text class="t" x="812" y="302">4 worker threads</text>
+          <text class="t" x="812" y="318">hard time limit</text>
+          <text class="tt" x="812" y="344">→ 400 results</text>
+          <text class="tcm" x="812" y="368">7m 58s</text>
+
+          <rect class="box-stage" x="994" y="240" width="150" height="140" rx="4"/>
+          <text class="tt" x="1006" y="264">5 · Deliver</text>
+          <text class="t" x="1006" y="286">risk filters, sort</text>
+          <text class="t" x="1006" y="302">email top picks</text>
+          <text class="t" x="1006" y="318">save the run</text>
+          <text class="tt" x="1006" y="344">→ runs row</text>
+          <text class="tcm" x="1006" y="368">48s</text>
+
+          <!-- Stage → stage -->
+          <line class="edge" x1="174" y1="310" x2="216" y2="310" marker-end="url(#a1)"/>
+          <line class="edge" x1="368" y1="310" x2="410" y2="310" marker-end="url(#a1)"/>
+          <line class="edge" x1="562" y1="310" x2="604" y2="310" marker-end="url(#a1)"/>
+          <line class="edge" x1="756" y1="310" x2="798" y2="310" marker-end="url(#a1)"/>
+          <line class="edge" x1="950" y1="310" x2="992" y2="310" marker-end="url(#a1)"/>
+
+          <!-- Stage → storage -->
+          <line class="edge" x1="293" y1="380" x2="293" y2="448" marker-end="url(#a1)"/>
+          <text class="tm" x="299" y="420">writes</text>
+          <line class="edge" x1="875" y1="380" x2="875" y2="448" marker-end="url(#a1)"/>
+          <text class="tm" x="881" y="420">reads + writes</text>
+          <line class="edge" x1="1069" y1="380" x2="1069" y2="448" marker-end="url(#a1)"/>
+          <text class="tcm" x="1075" y="420">save_run()</text>
+
+          <!-- DuckDB lake -->
+          <rect class="box-store" x="208" y="450" width="754" height="190" rx="6"/>
+          <rect class="box-chip" x="226" y="468" width="134" height="24" rx="3"/>
+          <text class="tc" x="236" y="484">known_symbols</text>
+          <rect class="box-chip" x="226" y="500" width="134" height="24" rx="3"/>
+          <text class="tc" x="236" y="516">raw_bhavcopy</text>
+          <rect class="box-chip" x="226" y="532" width="134" height="24" rx="3"/>
+          <text class="tc" x="236" y="548">raw_delivery</text>
+
+          <text class="tt" x="412" y="480">DuckDB lake</text>
+          <text class="tm" x="412" y="498">lake.duckdb, one file on the VM volume</text>
+          <text class="t" x="412" y="530">Tier 1 keeps its 2,000 histories in</text>
+          <text class="t" x="412" y="546">memory and writes nothing here.</text>
+          <text class="t" x="412" y="578">8 more tables are created at startup,</text>
+          <text class="t" x="412" y="594">but nothing in the pipeline writes them.</text>
+
+          <rect class="box-chip" x="806" y="462" width="140" height="24" rx="3"/>
+          <text class="tc" x="816" y="478">raw_ohlcv</text>
+          <rect class="box-chip" x="806" y="494" width="140" height="24" rx="3"/>
+          <text class="tc" x="816" y="510">fundamentals_cache</text>
+          <rect class="box-chip" x="806" y="526" width="140" height="24" rx="3"/>
+          <text class="tc" x="816" y="542">score_history</text>
+          <rect class="box-chip" x="806" y="558" width="140" height="24" rx="3"/>
+          <text class="tc" x="816" y="574">event_log</text>
+          <rect class="box-warn" x="806" y="590" width="140" height="24" rx="3"/>
+          <text class="tc" x="816" y="606">raw_fii_dii · empty*</text>
+
+          <!-- SQLite + dashboard -->
+          <rect class="box-store" x="994" y="450" width="150" height="74" rx="4"/>
+          <text class="tt" x="1006" y="472">SQLite</text>
+          <text class="tc" x="1006" y="490">stockradar.db</text>
+          <text class="t" x="1006" y="508">runs: one row per run</text>
+          <line class="edge" x1="1069" y1="524" x2="1069" y2="564" marker-end="url(#a1)"/>
+          <text class="tcm" x="1075" y="549">/api/latest</text>
+          <rect class="box" x="994" y="566" width="150" height="74" rx="4"/>
+          <text class="tt" x="1006" y="588">Dashboard</text>
+          <text class="t" x="1006" y="606">React app via nginx</text>
+          <text class="t" x="1006" y="622">behind Google login</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i class="sw ext"></i>Outside the VM</span>
+        <span><i class="sw store"></i>Storage on the VM</span>
+        <span><i class="sw warn"></i>Problem found while mapping</span>
+      </div>
+      <figcaption>Stage 1 downloads 5 days of prices for 1,698 stocks, then Stage 3 downloads a full year for the same stocks again (dashed marigold path). Only Tier 2 and the deliver step write anything you can query later. *Fixed on the pending branch: Tier 2 will store FII/DII flows each run.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>Where the 39 minutes go</h2>
+      <p>Each block is drawn to scale. Most of the run is spent waiting on Yahoo, not computing.</p>
+    </div>
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 1200 210" role="img" aria-label="Timeline of the 09:15 run, 38 minutes 55 seconds: Yahoo downloads take about 24 minutes, of which 10 minutes is the duplicate 5-day quote download. The pending fix is estimated to bring the run to about 29 minutes.">
+          <text class="tt" x="0" y="50">Measured</text>
+          <text class="tm" x="0" y="66">26 Oct, 09:15 run</text>
+          <text class="tt" x="0" y="120">After the fix</text>
+          <text class="tm" x="0" y="136">estimate</text>
+
+          <!-- Row 1: measured. 0.41667 px per second, x0 = 170 -->
+          <rect class="seg-fetch" x="170" y="34" width="33.3" height="44"/>
+          <rect class="seg-dup" x="203.3" y="34" width="253.4" height="44"/>
+          <text class="ta" x="330" y="53" text-anchor="middle">Yahoo 5d × 1,698</text>
+          <text class="tc" x="330" y="69" text-anchor="middle">10m 08s</text>
+          <rect class="seg-fetch" x="456.7" y="34" width="5.8" height="44"/>
+          <rect class="seg-fetch" x="462.5" y="34" width="345" height="44"/>
+          <text class="t" x="635" y="53" text-anchor="middle">Tier 1 · Yahoo 1y × 2,000</text>
+          <text class="tc" x="635" y="69" text-anchor="middle">13m 48s</text>
+          <rect class="seg-cpu" x="807.5" y="34" width="114.2" height="44"/>
+          <text class="t" x="864.6" y="53" text-anchor="middle">Tier 1 scoring</text>
+          <text class="tc" x="864.6" y="69" text-anchor="middle">4m 34s</text>
+          <rect class="seg-fetch" x="921.7" y="34" width="199.1" height="44"/>
+          <text class="t" x="1021.3" y="53" text-anchor="middle">Tier 2 deep</text>
+          <text class="tc" x="1021.3" y="69" text-anchor="middle">7m 58s</text>
+          <rect class="seg-cpu" x="1120.8" y="34" width="20" height="44"/>
+          <text class="tc" x="1146" y="61">38m 55s</text>
+
+          <!-- Row 2: estimate -->
+          <rect class="seg-fetch" x="170" y="104" width="33.3" height="44"/>
+          <rect class="seg-fetch" x="203.3" y="104" width="291.7" height="44"/>
+          <text class="t" x="349.2" y="123" text-anchor="middle">Yahoo 1y × 1,650, used twice</text>
+          <text class="tc" x="349.2" y="139" text-anchor="middle">≈ 11m 40s</text>
+          <rect class="seg-fetch" x="495" y="104" width="5.8" height="44"/>
+          <rect class="seg-fetch" x="500.8" y="104" width="69.2" height="44"/>
+          <text class="tc" x="535.4" y="131" text-anchor="middle">≈ 2m 46s</text>
+          <rect class="seg-cpu" x="570" y="104" width="114.2" height="44"/>
+          <text class="tc" x="627.1" y="131" text-anchor="middle">4m 34s</text>
+          <rect class="seg-fetch" x="684.2" y="104" width="199.1" height="44"/>
+          <text class="tc" x="783.8" y="131" text-anchor="middle">7m 58s</text>
+          <rect class="seg-cpu" x="883.3" y="104" width="20" height="44"/>
+          <text class="tc" x="909" y="131">≈ 29m</text>
+
+          <!-- Axis: 5 min = 125 px -->
+          <line class="axis" x1="170" y1="166" x2="1170" y2="166"/>
+          <line class="axis" x1="170" y1="162" x2="170" y2="170"/><text class="tcm" x="170" y="186" text-anchor="middle">0</text>
+          <line class="axis" x1="295" y1="162" x2="295" y2="170"/><text class="tcm" x="295" y="186" text-anchor="middle">5</text>
+          <line class="axis" x1="420" y1="162" x2="420" y2="170"/><text class="tcm" x="420" y="186" text-anchor="middle">10</text>
+          <line class="axis" x1="545" y1="162" x2="545" y2="170"/><text class="tcm" x="545" y="186" text-anchor="middle">15</text>
+          <line class="axis" x1="670" y1="162" x2="670" y2="170"/><text class="tcm" x="670" y="186" text-anchor="middle">20</text>
+          <line class="axis" x1="795" y1="162" x2="795" y2="170"/><text class="tcm" x="795" y="186" text-anchor="middle">25</text>
+          <line class="axis" x1="920" y1="162" x2="920" y2="170"/><text class="tcm" x="920" y="186" text-anchor="middle">30</text>
+          <line class="axis" x1="1045" y1="162" x2="1045" y2="170"/><text class="tcm" x="1045" y="186" text-anchor="middle">35</text>
+          <line class="axis" x1="1170" y1="162" x2="1170" y2="170"/><text class="tcm" x="1170" y="186" text-anchor="middle">40 min</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i class="sw ext"></i>Waiting on a network source</span>
+        <span><i class="sw cpu"></i>Computing on the VM</span>
+        <span><i class="sw warn"></i>Duplicate download</span>
+      </div>
+      <figcaption>Unlabelled slivers are startup plus NSE (1m 20s), the regime step (14s) and saving plus email (48s). The second bar is an estimate: it assumes each Yahoo batch takes as long as it did today. The fix was deployed to the VM on 2026-10-26 (<code>726bb3d</code>); the first run with it is 2026-10-27 09:15.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>How one stock is scored</h2>
+      <p>Tier 2 runs this for each of the 400 shortlisted stocks. Six factor scores, each 0–100, are combined with fixed weights from <code>core/scoring/hybrid.py</code>.</p>
+    </div>
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 1200 420" role="img" aria-label="Scoring: fundamental 30 percent, technical 25, institutional 15, sentiment 10, sector 10 and risk 10 percent are summed, multiplied by the market regime multiplier, and mapped to BUY at 75 or more, WATCH 60 to 74, HOLD 40 to 59, and SELL below 40.">
+          <defs>
+            <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+
+          <!-- Row geometry: y = 20 + i*66, h = 50, centre = y + 25 -->
+          <rect class="box-ext" x="24" y="20" width="430" height="50" rx="4"/>
+          <text class="t" x="36" y="41">Yahoo company data: P/E, ROE, debt/equity, growth, pledge</text>
+          <text class="tm" x="36" y="58">cached 7–9 days in fundamentals_cache, so most runs skip the call</text>
+          <line class="edge" x1="454" y1="45" x2="488" y2="45" marker-end="url(#a3)"/>
+          <rect class="box" x="490" y="20" width="220" height="50" rx="4"/>
+          <text class="tt" x="502" y="40">Fundamental</text>
+          <text class="tc" x="698" y="40" text-anchor="end">30%</text>
+          <rect class="track" x="502" y="52" width="120" height="8"/><rect class="bar" x="502" y="52" width="120" height="8"/>
+
+          <rect class="box" x="24" y="86" width="430" height="50" rx="4"/>
+          <text class="t" x="36" y="107">1-year daily price history, already in memory from Tier 1</text>
+          <text class="tm" x="36" y="124">RSI, MACD, ADX, SMA 50/200, volume surge, 52-week range</text>
+          <line class="edge" x1="454" y1="111" x2="488" y2="111" marker-end="url(#a3)"/>
+          <rect class="box" x="490" y="86" width="220" height="50" rx="4"/>
+          <text class="tt" x="502" y="106">Technical</text>
+          <text class="tc" x="698" y="106" text-anchor="end">25%</text>
+          <rect class="track" x="502" y="118" width="120" height="8"/><rect class="bar" x="502" y="118" width="100" height="8"/>
+
+          <rect class="box-ext" x="24" y="152" width="430" height="50" rx="4"/>
+          <text class="t" x="36" y="173">NSE: FII/DII net flow, delivery % from the bhavcopy</text>
+          <text class="tm" x="36" y="190">option-chain PCR and max pain for the 219 F&amp;O stocks</text>
+          <line class="edge" x1="454" y1="177" x2="488" y2="177" marker-end="url(#a3)"/>
+          <rect class="box" x="490" y="152" width="220" height="50" rx="4"/>
+          <text class="tt" x="502" y="172">Institutional</text>
+          <text class="tc" x="698" y="172" text-anchor="end">15%</text>
+          <rect class="track" x="502" y="184" width="120" height="8"/><rect class="bar" x="502" y="184" width="60" height="8"/>
+
+          <rect class="box-ext" x="24" y="218" width="430" height="50" rx="4"/>
+          <text class="t" x="36" y="239">Yahoo news, Google News RSS, Economic Times RSS</text>
+          <text class="tm" x="36" y="256">headlines scored with VADER plus keyword rules</text>
+          <line class="edge" x1="454" y1="243" x2="488" y2="243" marker-end="url(#a3)"/>
+          <rect class="box" x="490" y="218" width="220" height="50" rx="4"/>
+          <text class="tt" x="502" y="238">Sentiment</text>
+          <text class="tc" x="698" y="238" text-anchor="end">10%</text>
+          <rect class="track" x="502" y="250" width="120" height="8"/><rect class="bar" x="502" y="250" width="40" height="8"/>
+
+          <rect class="box" x="24" y="284" width="430" height="50" rx="4"/>
+          <text class="t" x="36" y="305">Sector breadth from the regime step</text>
+          <text class="tm" x="36" y="322">same value for every stock in a run</text>
+          <line class="edge" x1="454" y1="309" x2="488" y2="309" marker-end="url(#a3)"/>
+          <rect class="box" x="490" y="284" width="220" height="50" rx="4"/>
+          <text class="tt" x="502" y="304">Sector</text>
+          <text class="tc" x="698" y="304" text-anchor="end">10%</text>
+          <rect class="track" x="502" y="316" width="120" height="8"/><rect class="bar" x="502" y="316" width="40" height="8"/>
+
+          <rect class="box" x="24" y="350" width="430" height="50" rx="4"/>
+          <text class="t" x="36" y="371">Pledge %, debt/equity, market cap, ATR volatility</text>
+          <text class="tm" x="36" y="388">small caps, high pledge and wild swings lose points</text>
+          <line class="edge" x1="454" y1="375" x2="488" y2="375" marker-end="url(#a3)"/>
+          <rect class="box" x="490" y="350" width="220" height="50" rx="4"/>
+          <text class="tt" x="502" y="370">Risk</text>
+          <text class="tc" x="698" y="370" text-anchor="end">10%</text>
+          <rect class="track" x="502" y="382" width="120" height="8"/><rect class="bar" x="502" y="382" width="40" height="8"/>
+
+          <!-- Converge -->
+          <line class="edge" x1="710" y1="45" x2="768" y2="196"/>
+          <line class="edge" x1="710" y1="111" x2="766" y2="202"/>
+          <line class="edge" x1="710" y1="177" x2="764" y2="208"/>
+          <line class="edge" x1="710" y1="243" x2="764" y2="214"/>
+          <line class="edge" x1="710" y1="309" x2="766" y2="220"/>
+          <line class="edge" x1="710" y1="375" x2="768" y2="226"/>
+          <circle class="box-stage" cx="790" cy="211" r="26"/>
+          <text class="tsig" x="790" y="219" text-anchor="middle">Σ</text>
+
+          <line class="edge" x1="816" y1="211" x2="848" y2="211" marker-end="url(#a3)"/>
+          <rect class="box-stage" x="850" y="181" width="150" height="60" rx="4"/>
+          <text class="tt" x="925" y="206" text-anchor="middle">× regime</text>
+          <text class="tt" x="925" y="224" text-anchor="middle">multiplier</text>
+          <text class="tm" x="925" y="266" text-anchor="middle">Risk engine then drops</text>
+          <text class="tm" x="925" y="282" text-anchor="middle">stocks over its pledge,</text>
+          <text class="tm" x="925" y="298" text-anchor="middle">market-cap or liquidity</text>
+          <text class="tm" x="925" y="314" text-anchor="middle">limits</text>
+
+          <line class="edge" x1="1000" y1="211" x2="1028" y2="211" marker-end="url(#a3)"/>
+          <rect class="box-stage" x="1030" y="181" width="150" height="60" rx="4"/>
+          <text class="tt" x="1105" y="206" text-anchor="middle">Final score</text>
+          <text class="tc" x="1105" y="224" text-anchor="middle">0–100</text>
+
+          <line class="edge" x1="1105" y1="241" x2="1105" y2="258" marker-end="url(#a3)"/>
+          <text class="tc" x="1048" y="278">≥ 75</text><text class="tt" x="1100" y="278">BUY</text>
+          <text class="tc" x="1048" y="298">60–74</text><text class="tt" x="1100" y="298">WATCH</text>
+          <text class="tc" x="1048" y="318">40–59</text><text class="tt" x="1100" y="318">HOLD</text>
+          <text class="tc" x="1048" y="338">&lt; 40</text><text class="tt" x="1100" y="338">SELL</text>
+        </svg>
+      </div>
+      <figcaption>Blue rows call an outside source during Tier 2; white rows reuse data the run already has. Bar length is the factor's weight. The technical weight is the one the July factor-IC check flagged as doubtful at short horizons.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>What gets stored</h2>
+      <p>Two databases on the VM. The DuckDB lake holds raw market data and per-stock history; SQLite holds one finished result set per run, which is what the dashboard and the history view read.</p>
+    </div>
+    <div class="grid-2">
+      <div class="panel">
+        <h3>DuckDB lake · tables the pipeline uses</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Table</th><th>Written by</th><th>Read by</th><th>Per run</th></tr></thead>
+            <tbody>
+              <tr><td><code>known_symbols</code></td><td>Stock list</td><td>Fallback when NSE fails</td><td class="num">~2,000 upserts</td></tr>
+              <tr><td><code>raw_bhavcopy</code></td><td>Stock list</td><td>Label backfill</td><td class="num">~2,700 rows</td></tr>
+              <tr><td><code>raw_delivery</code></td><td>Stock list</td><td>Institutional score</td><td class="num">~2,700 rows</td></tr>
+              <tr><td><code>raw_ohlcv</code></td><td>Tier 2</td><td>Label backfill</td><td class="num">400 histories</td></tr>
+              <tr><td><code>fundamentals_cache</code></td><td>Tier 2</td><td>Tier 2</td><td class="num">only stale entries</td></tr>
+              <tr><td><code>score_history</code></td><td>Tier 2</td><td>Factor IC, labels</td><td class="num">400 rows</td></tr>
+              <tr><td><code>event_log</code></td><td>Every stage</td><td><code>/api/events</code></td><td class="num">many</td></tr>
+              <tr class="warn"><td><code>raw_fii_dii</code></td><td class="dim">Nothing</td><td>Institutional score</td><td class="num">0 rows</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Created but never written: <code>raw_options</code>, <code>raw_options_summary</code>, <code>raw_news</code>, <code>raw_macro</code>, <code>raw_fundamentals</code>, <code>feature_snapshots</code>, <code>backtest_runs</code>, <code>alert_history</code>.</p>
+      </div>
+
+      <div class="panel">
+        <h3>SQLite · <code>runs</code></h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Column</th><th>Holds</th></tr></thead>
+            <tbody>
+              <tr><td><code>id</code></td><td>Run number</td></tr>
+              <tr><td><code>run_time</code></td><td>When the run <em>finished</em>, not when it started</td></tr>
+              <tr><td><code>market_trend</code></td><td>BULLISH, NEUTRAL or BEARISH</td></tr>
+              <tr><td><code>vix_value</code></td><td>India VIX at run time</td></tr>
+              <tr><td><code>nifty_change</code></td><td>NIFTY 50 one-day change, %</td></tr>
+              <tr><td><code>sector_changes</code></td><td>JSON: sector → breadth</td></tr>
+              <tr><td><code>results_json</code></td><td>JSON list of up to 400 stock records (below)</td></tr>
+              <tr><td><code>email_sent</code></td><td>0 or 1</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>One stock record inside <code>results_json</code></h3>
+      <p>This is what the dashboard table and the email are built from. Field groups are annotated; types shown where values vary.</p>
+<pre class="record">{
+  <span class="c">// identity</span>
+  "symbol": "JSWSTEEL", "company_name": str, "industry": str,
+  <span class="c">// price, from the stock-list quote</span>
+  "price": 1260.0, "intraday_change": 6.28, "live_volume": float,
+  "high_52w": float, "low_52w": float, "pct_from_52w_high": float, "pct_from_52w_low": float,
+  <span class="c">// the verdict</span>
+  "score": 67.3, "signal": "WATCH", "regime_multiplier": float,
+  "factor_scores": { "fundamental", "technical", "institutional", "sentiment", "sector", "risk" },
+  "top_reasons": [str, ...],
+  <span class="c">// technicals, from the 1y history</span>
+  "rsi", "adx", "stoch_k", "bb_pct", "atr_pct", "roc_5d", "roc_10d", "sma_50", "sma_200",
+  "macd_bullish": bool, "golden_cross": bool, "vol_surge": bool, "volume_ratio": float,
+  <span class="c">// fundamentals, from Yahoo (cached)</span>
+  "pe_ratio", "revenue_growth", "eps_growth", "market_cap_cr", "pledged_pct", "analyst_rating",
+  <span class="c">// flows and news</span>
+  "delivery_pct", "delivery_pct_5d", "news_sentiment": str, "news_score": float, "top_news": [str, ...]
+}</pre>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>The feedback loop</h2>
+      <p>Every score is kept so it can be checked against what the stock actually did afterwards. This is how the weights above are meant to improve.</p>
+    </div>
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 1200 190" role="img" aria-label="Feedback loop: score_history rows get 5, 10 and 20 day forward returns filled in after each run; the factor IC endpoint measures how well each factor predicted those returns; the weights are re-tuned by hand and the next runs score with them.">
+          <defs>
+            <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+          <rect class="box-store" x="24" y="30" width="252" height="78" rx="4"/>
+          <text class="tc" x="38" y="54">score_history</text>
+          <text class="t" x="38" y="74">one row per stock per run:</text>
+          <text class="t" x="38" y="90">final score + all 6 factor scores</text>
+
+          <line class="edge" x1="276" y1="69" x2="322" y2="69" marker-end="url(#a4)"/>
+          <rect class="box" x="324" y="30" width="252" height="78" rx="4"/>
+          <text class="tc" x="338" y="54">backfill_labels()</text>
+          <text class="t" x="338" y="74">runs at the end of every analysis;</text>
+          <text class="t" x="338" y="90">adds 5d, 10d, 20d forward returns</text>
+
+          <line class="edge" x1="576" y1="69" x2="622" y2="69" marker-end="url(#a4)"/>
+          <rect class="box" x="624" y="30" width="252" height="78" rx="4"/>
+          <text class="tc" x="638" y="54">GET /api/factor-ic</text>
+          <text class="t" x="638" y="74">rank correlation (IC) between each</text>
+          <text class="t" x="638" y="90">factor and the later return</text>
+
+          <line class="edge" x1="876" y1="69" x2="922" y2="69" marker-end="url(#a4)"/>
+          <rect class="box-dash" x="924" y="30" width="252" height="78" rx="4"/>
+          <text class="tc" x="938" y="54">WEIGHTS in hybrid.py</text>
+          <text class="t" x="938" y="74">re-tuned by hand once the 10d and</text>
+          <text class="t" x="938" y="90">20d horizons have enough rows</text>
+
+          <path class="edge" d="M1050 108 V150 H150 V110" marker-end="url(#a4)"/>
+          <text class="tm" x="600" y="170" text-anchor="middle">later runs score with the new weights</text>
+        </svg>
+      </div>
+      <figcaption>The last step is manual and has not happened yet. The GCP VM started with an empty database on 25 Oct, so its own history is only days old.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>Things the map turned up</h2>
+    </div>
+    <ul class="findings">
+      <li>
+        <span class="pill fixed">Deployed 2026-10-26</span>
+        <h3>Yahoo prices are downloaded twice for the same stocks</h3>
+        <p>The stock-list step fetches 5 days for 1,698 stocks, then Tier 1 fetches a year for the same stocks. The fix fetches the year once and takes the quote from it. In a 100-stock test the quotes matched exactly.</p>
+      </li>
+      <li>
+        <span class="pill fixed">Deployed 2026-10-26</span>
+        <h3>The “3-day” FII/DII flow is really one day</h3>
+        <p>The institutional score sums the last 3 days from <code>raw_fii_dii</code>, but only <code>run_full_collection()</code> writes that table, and the pipeline never calls it. On the VM the table is empty, so the code falls back to today's figure alone. Today's log shows it: FII net 888 Cr, and FII 3-day also 888. The fix stores each day's flows under NSE's trading date; the window fills over the first 3 trading days after deploy.</p>
+      </li>
+      <li>
+        <span class="pill info">Cleanup</span>
+        <h3>Eight lake tables are never written</h3>
+        <p>They are created at startup and nothing reads or writes them. They cost nothing at runtime, but anyone reading the schema would assume options, news and macro data are being stored.</p>
+      </li>
+    </ul>
+  </section>
+
+  <footer>
+    Mapped from the code on <code>alt-approach</code> (57fdbb5) plus the pending branch, and from the backend log of the 26 Oct 2026 09:15 run on the GCP VM.
+  </footer>
+</main>
+
+</body>
+</html>

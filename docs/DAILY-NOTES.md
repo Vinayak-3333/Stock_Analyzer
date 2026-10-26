@@ -43,6 +43,106 @@ future you) can pick up without re-deriving context.
 | [DN-21](#dn-21) | 2026-10-25 | GCP `e2-micro` + Funnel (not Caddy) as the always-on host |
 | [DN-22](#dn-22) | 2026-10-25 | Pull CI images rather than build on 1 GB; `TIER2_WORKERS=4` + 2 GB swap |
 | [DN-23](#dn-23) | 2026-10-25 | Phase 6 — merged `alt-approach` to `master`; `master` is no longer unauthenticated |
+| [DN-24](#dn-24) | 2026-10-26 | Download each symbol's Yahoo history once; quotes come from the 1y frame |
+| [DN-25](#dn-25) | 2026-10-26 | Store FII/DII every run, keyed by NSE's trading date, not `date.today()` |
+
+---
+
+## 2026-10-26
+
+First weekday on the GCP VM. Verified the scheduler, found the VM is billed
+(but covered by trial credit), sped up the run, and fixed a silent
+institutional-score bug that turned up while mapping the pipeline.
+
+### Shipped
+| Commit | What |
+|---|---|
+| `0634c41` | Single Yahoo history download per run (DN-24) |
+| `2edeac6` | FII/DII stored each run so the 3-day window is real (DN-25) |
+| `726bb3d` | Merged to `master`; CI build green; **deployed to the VM 22:03 IST** (image `589df4c4`) — both fixes confirmed in the container, 09:15/15:30 jobs re-armed, public health OK, `/auth/me` 401 |
+| `9d4317d` | Architecture diagram added as [`docs/ARCHITECTURE.html`](ARCHITECTURE.html) (on `alt-approach`) |
+
+Also: an architecture map of the pipeline (sources → stages → stores →
+feedback loop, with measured timings). The repo copy is
+[`docs/ARCHITECTURE.html`](ARCHITECTURE.html): one self-contained file, so open
+it in a browser (GitHub shows the source). Both fixes are marked deployed. The
+same page is also published as a private claude.ai page:
+https://claude.ai/artifact/1ruFdmZBtBH8hDbp6m5dmi. Keep the two in step when
+the pipeline changes.
+
+### Found
+- **Both scheduled runs fired on time on the VM** — 09:15:02 (finished
+  09:53:57) and 15:30:02 (finished 16:05:37), 400/400 Tier-2, email sent.
+  **The July sleep-freeze thread is closed**: a VM doesn't sleep, so
+  `ec4c043`'s nudge is no longer load-bearing.
+- **The VM is in `asia-south1-c` (Mumbai), outside the always-free regions.**
+  `e2-micro` and `pd-standard` are correct, but free only in three US regions.
+  Billing console: **free-trial account**, ₹34.11 spent in ~1.5 days, all
+  covered by credit (₹28,768 left, 89 days). When the trial ends (~**23 Jan
+  2027**) Google *stops every trial resource* unless the account is upgraded —
+  so the site goes down that day regardless of region. Also: Google requires
+  account verification by **22 Feb 2027**.
+- **Where the 39 minutes went** (09:15 run): Yahoo 5d quotes 10m08s, Tier-1
+  1y download 13m48s, Tier-1 scoring 4m34s, Tier 2 7m58s, rest ~2 min. The 5d
+  pass fetched the same 1,698 symbols Tier 1 then fetched again for a year.
+- **On the VM each 100-symbol Yahoo batch takes 70–80 s; on the laptop ~5 s.**
+  The `e2-micro` (shared 0.25 vCPU sustained) is now the dominant cost, not
+  the code. Memory is fine: 426 Mi of 2 GB swap in use.
+- **The "3-day" FII/DII flow was one day.** `raw_fii_dii` is written only by
+  `run_full_collection()`, which the modular pipeline never calls. On the VM
+  the table was empty, so the sum fell back to today alone — the 09:15 log
+  shows FII net 888 and FII_3d 888. Same class of bug as DN-01: a producer
+  and consumer that nothing cross-checks.
+- **NSE's FII/DII endpoint serves the previous session in the morning**; each
+  record carries its own `date`. Labelling with `date.today()` would have
+  shifted the window by a day.
+- **Eight lake tables are created but never written**: `raw_options`,
+  `raw_options_summary`, `raw_news`, `raw_macro`, `raw_fundamentals`,
+  `feature_snapshots`, `backtest_runs`, `alert_history`. Harmless at runtime,
+  misleading to read. Not acted on.
+- Access notes: `gcloud` auth had expired (re-login needed); the project is
+  `stock-radar-512711` (default config points at `mern-378315`); the SSH user
+  isn't in the `docker` group, so VM docker commands need `sudo`.
+
+### <a id="dn-24"></a>DN-24 — One Yahoo history download per run
+Symbol resolution now fetches the **1y** history for the supplementary symbols
+and derives each quote from the last two rows; Tier 1 reuses those frames and
+only downloads the ~300 NSE-live symbols. ~37 bulk batches → ~21, ~45% less
+Yahoo volume — which also matters because Yahoo throttling is cumulative.
+Estimated run time ~39 → ~29 min, **unverified until a real VM run**.
+
+Dropped with it: the `fast_info` enrichment (it only ran for symbols missing
+from the bulk download, which Tier 1 can't screen anyway). Symbols with < 60
+rows of history now get no quote instead of being dropped at Tier 1 — same
+analysed set, smaller `known_symbols`. The 30 s-cooldown throttling retry moved
+into `_bulk_download_histories` so it isn't lost.
+
+Verified: 100 random symbols, old 5d path vs new — 0 mismatches across 7 quote
+fields; the 13 the new path skips all have < 60 rows. Reduced end-to-end run
+(500-symbol universe, 20 deep) on a scratch lake.
+
+### <a id="dn-25"></a>DN-25 — Store FII/DII every run, keyed by trading date
+`_resolve_fii_dii_3d` now fetches the latest flows once per run, upserts them,
+then sums the last 3 stored days. Rows are keyed by the date NSE reports. The
+`fii_net` comparison heuristic is gone; the date primary key makes reruns
+idempotent. Tested on a scratch lake: rolling sums over 4 simulated days,
+same-day rerun not double-counted, NSE outage falls back to stored days, live
+fetch stored under 26 Oct.
+
+**Scores will shift.** The institutional factor now sees three days, and the
+FII-selling/DII-buying divergence flag becomes meaningful (true on today's
+live data). The window fills over the first 3 trading days after deploy.
+
+### Open
+- **Check Tuesday 09:15**, the first run with both fixes: run time vs the
+  ~29 min estimate, and the "FII/DII window has N of 3" log line.
+- VM deploy gotcha: the compose dir is under `/home/vinnu_smath333`, which
+  the gcloud SSH user can't enter — run compose via `sudo bash -c "cd … && …"`.
+- **Before ~23 Jan 2027**: upgrade the billing account *and* move the VM to a
+  US free region in the same step (keep the `stockradar` tailnet name so the
+  URL survives). Doing it earlier gains nothing while credit pays.
+- **Account verification by 22 Feb 2027** — the user's action, in the console.
+- The 8 never-written lake tables: delete from the schema or wire them up.
 
 ---
 
