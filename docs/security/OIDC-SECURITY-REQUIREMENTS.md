@@ -1,10 +1,12 @@
 # OIDC Integration & Security Hardening — Requirements
 
-> Branch: `alt-approach`. Status: **complete for the current topology**
-> (2026-10-25). Phases 1–5 done — auth verified against a real Google login,
-> hardening in place, secrets closed. Phase 6 (merge to `master`) is
-> deliberately deferred until a production backend exists; see the progress log
-> for the reasoning and the checklist to resume.
+> Status: **COMPLETE** (2026-10-25). All six phases done. Auth verified against
+> a real Google login, hardening in place, secrets closed, deployed always-on
+> to a GCP `e2-micro` at `https://stockradar.tail7679a0.ts.net`, and merged to
+> `master` — which is therefore **no longer unauthenticated**.
+>
+> Deployment runbook: `docs/DEPLOYMENT.md`. Day-by-day record and the reasoning
+> behind each decision: `docs/DAILY-NOTES.md`.
 >
 > This is the design doc we execute step by step. Section 10 is the running
 > record; read it before changing anything here.
@@ -133,8 +135,12 @@ Audited on the `alt-approach` branch against `backend/api.py`,
    NAS nginx set `TRUST_PROXY_HEADERS=true` — in that topology the rate limiter
    otherwise sees the proxy's IP for every unauthenticated caller, collapsing
    them into a single shared bucket.
-7. **Phase 6 — Validate & merge.** End-to-end test on `alt-approach`; then merge
-   to `master`.
+7. **Phase 6 — Validate & merge. DONE 2026-10-25.** Verified end to end against
+   a real Google login on the deployed host, then merged to `master`
+   (`0b55944`). The merge was clean despite the regime fix existing as two
+   commits (original + cherry-pick); the merged tree hashes identical to
+   `alt-approach`. `master`'s ghcr images now contain the auth code — until
+   this, `:latest` was the unauthenticated build.
 
 ## 8. Dependencies to add (tentative)
 
