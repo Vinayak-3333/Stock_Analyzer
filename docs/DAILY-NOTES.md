@@ -60,10 +60,15 @@ institutional-score bug that turned up while mapping the pipeline.
 | `0634c41` | Single Yahoo history download per run (DN-24) |
 | `2edeac6` | FII/DII stored each run so the 3-day window is real (DN-25) |
 | `726bb3d` | Merged to `master`; CI build green; **deployed to the VM 22:03 IST** (image `589df4c4`) — both fixes confirmed in the container, 09:15/15:30 jobs re-armed, public health OK, `/auth/me` 401 |
+| `9d4317d` | Architecture diagram added as [`docs/ARCHITECTURE.html`](ARCHITECTURE.html) (on `alt-approach`) |
 
 Also: an architecture map of the pipeline (sources → stages → stores →
-feedback loop, with measured timings) published as a private claude.ai page:
-https://claude.ai/artifact/1ruFdmZBtBH8hDbp6m5dmi
+feedback loop, with measured timings). The repo copy is
+[`docs/ARCHITECTURE.html`](ARCHITECTURE.html): one self-contained file, so open
+it in a browser (GitHub shows the source). Both fixes are marked deployed. The
+same page is also published as a private claude.ai page:
+https://claude.ai/artifact/1ruFdmZBtBH8hDbp6m5dmi. Keep the two in step when
+the pipeline changes.
 
 ### Found
 - **Both scheduled runs fired on time on the VM** — 09:15:02 (finished
