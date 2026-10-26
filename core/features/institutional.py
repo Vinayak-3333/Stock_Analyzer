@@ -11,7 +11,8 @@ Features
 - Put/Call ratio, max-pain distance, OI buildup (per-symbol)
 
 All data is fetched directly from NSE APIs via ``core.collectors.nse``.
-No Kafka or DuckDB dependency — works standalone.
+FII/DII flows are stored in the lake's ``raw_fii_dii`` on each run, because
+NSE only serves the latest trading day and the 3-day window needs history.
 
 Usage
 -----
@@ -207,17 +208,23 @@ def _resolve_fii_dii_3d(session) -> tuple[float, float, bool]:
         if _fii_dii_cache is not None and time.time() - _fii_dii_cache[0] < _FII_DII_TTL_SECONDS:
             return _fii_dii_cache[1]
 
+        # NSE only serves the latest trading day, so the 3-day window exists
+        # only if each run stores what it fetched.  Nothing else in the modular
+        # pipeline writes raw_fii_dii — without this the "3-day" sum was
+        # silently a 1-day value.
+        latest = _fetch_fii_dii_safe(session)
+        if latest:
+            try:
+                from core.collectors.nse import save_fii_dii_to_lake
+                save_fii_dii_to_lake(latest)
+            except Exception as exc:
+                log.warning("Could not store FII/DII for %s: %s", latest.get("date"), exc)
+
         history = _get_fii_dii_history(days=3)
+        if not history and latest:
+            history = [{"fii_net": latest.get("fii_net"), "dii_net": latest.get("dii_net")}]
         if len(history) < 3:
-            today = _fetch_fii_dii_safe(session)
-            if today:
-                # Avoid double-counting: only prepend if today isn't already
-                # in the lake result set (simple heuristic — compare fii_net)
-                if not history or history[0].get("fii_net") != today.get("fii_net"):
-                    history.insert(0, {
-                        "fii_net": today.get("fii_net"),
-                        "dii_net": today.get("dii_net"),
-                    })
+            log.info("FII/DII window has %d of 3 trading days so far", len(history))
 
         fii_vals = [_safe_float(h.get("fii_net")) for h in history]
         dii_vals = [_safe_float(h.get("dii_net")) for h in history]

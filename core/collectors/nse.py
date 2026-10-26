@@ -350,6 +350,12 @@ def fetch_fii_dii(session: requests.Session = None) -> Optional[dict]:
         "dii_buy":  None, "dii_sell": None, "dii_net": None,
     }
     for rec in data:
+        # NSE publishes after the close, so a morning run gets the previous
+        # trading day's flows — key the row by the trading date NSE reports.
+        try:
+            result["date"] = datetime.strptime(str(rec.get("date")), "%d-%b-%Y").date().isoformat()
+        except ValueError:
+            pass
         category = str(rec.get("category", "")).upper()
         if "FII" in category or "FPI" in category:
             result["fii_buy"]  = _parse_crore(rec.get("buyValue"))
