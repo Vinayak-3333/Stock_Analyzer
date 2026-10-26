@@ -108,10 +108,6 @@ def _bulk_download_histories(symbols: list[str]) -> dict[str, pd.DataFrame]:
     least MIN_HISTORY_ROWS rows.
     """
     engine = get_engine()
-    chunks = [
-        symbols[start:start + TIER1_CHUNK_SIZE]
-        for start in range(0, len(symbols), TIER1_CHUNK_SIZE)
-    ]
 
     def _download_chunk(chunk: list[str]) -> pd.DataFrame | None:
         yf_syms = [s if s.endswith(".NS") else f"{s}.NS" for s in chunk]
@@ -125,74 +121,12 @@ def _bulk_download_histories(symbols: list[str]) -> dict[str, pd.DataFrame]:
         )
 
     histories: dict[str, pd.DataFrame] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=BULK_PARALLEL_CHUNKS) as pool:
-        futures = {pool.submit(_download_chunk, chunk): chunk for chunk in chunks}
-        for future in concurrent.futures.as_completed(futures):
-            chunk = futures[future]
-            try:
-                df = future.result()
-            except Exception as exc:
-                log.warning("Bulk history chunk (%s…) failed: %s", chunk[0], exc)
-                continue
-            if df is None or df.empty:
-                continue
-            multi = isinstance(df.columns, pd.MultiIndex)
-            for raw_sym in chunk:
-                yf_sym = raw_sym if raw_sym.endswith(".NS") else f"{raw_sym}.NS"
-                try:
-                    sub = df[yf_sym] if multi else df
-                    sub = sub.dropna(how="all")
-                    if len(sub) >= MIN_HISTORY_ROWS:
-                        histories[raw_sym] = sub
-                except Exception:
-                    continue
-    log.info(
-        "Tier-1 bulk history: %d/%d symbols with >=%d rows",
-        len(histories), len(symbols), MIN_HISTORY_ROWS,
-    )
-    return histories
+    returned: set[str] = set()  # symbols Yahoo sent any rows for
 
-
-def _screen_universe(
-    symbols: list[str],
-    nifty_df: pd.DataFrame | None,
-) -> list[tuple[str, float, pd.DataFrame]]:
-    """
-    Tier 1: technical-only screen over the whole universe — no per-symbol
-    HTTP beyond the chunked bulk history download.  Returns
-    (symbol, technical_score, history_df) tuples sorted best-first; the
-    history is reused by Tier 2 so it is downloaded only once.
-    """
-    from core.features.technical import compute_technical_features, compute_technical_score
-
-    histories = _bulk_download_histories(symbols)
-    screened: list[tuple[str, float, pd.DataFrame]] = []
-    for sym, df in histories.items():
-        try:
-            tech = compute_technical_features(df, nifty_df)
-            screened.append((sym, compute_technical_score(tech), df))
-        except Exception as exc:
-            log.debug("Tier-1 screen failed for %s: %s", sym, exc)
-    screened.sort(key=lambda item: item[1], reverse=True)
-    return screened
-
-
-def _fallback_quotes_from_yfinance(symbols: list[str]) -> dict[str, dict]:
-    """
-    Build rich quote payloads from Yahoo Finance when NSE is blocked.
-    - Bulk-downloads last 5 days of OHLCV in chunked batches (Yahoo
-      silently drops most tickers when a single call asks for too many)
-    - Enriches with yearHigh/yearLow from fast_info in parallel
-    Works both during market hours (live price) and after-hours (last close).
-    """
-    yf_symbols = [sym if sym.endswith(".NS") else f"{sym}.NS" for sym in symbols]
-    sym_to_yfsym = dict(zip(symbols, yf_symbols))
-    quotes: dict[str, dict] = {}
-
-    # ── Step 1: Bulk OHLCV download (chunked — Yahoo throttles huge batches) ──
-    # Second pass retries symbols dropped by a transient 429 window.
+    # Second pass retries symbols dropped by a transient 429 window.  Short
+    # histories (recent listings) count as returned, so they never retry.
     for attempt in range(2):
-        targets = [s for s in symbols if s not in quotes]
+        targets = [s for s in symbols if s not in returned]
         if not targets:
             break
         if attempt:
@@ -204,138 +138,131 @@ def _fallback_quotes_from_yfinance(symbols: list[str]) -> dict[str, dict]:
             )
             time.sleep(30)
 
-        engine = get_engine()
-        quote_chunks = [
+        chunks = [
             targets[start:start + TIER1_CHUNK_SIZE]
             for start in range(0, len(targets), TIER1_CHUNK_SIZE)
         ]
-
-        def _download_quote_chunk(chunk: list[str]) -> pd.DataFrame | None:
-            return engine.call(
-                "yahoo_bulk",
-                lambda: yf.download(
-                    [sym_to_yfsym[s] for s in chunk],
-                    period="5d",
-                    interval="1d",
-                    progress=False,
-                    auto_adjust=True,
-                    threads=True,
-                ),
-            )
-
-        chunk_frames: list[tuple[list[str], pd.DataFrame]] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=BULK_PARALLEL_CHUNKS) as pool:
-            chunk_futures = {pool.submit(_download_quote_chunk, c): c for c in quote_chunks}
-            for future in concurrent.futures.as_completed(chunk_futures):
-                chunk = chunk_futures[future]
+            futures = {pool.submit(_download_chunk, chunk): chunk for chunk in chunks}
+            for future in concurrent.futures.as_completed(futures):
+                chunk = futures[future]
                 try:
                     df = future.result()
                 except Exception as exc:
-                    log.warning("Yahoo OHLCV chunk (%s…) failed: %s", chunk[0], exc)
+                    log.warning("Bulk history chunk (%s…) failed: %s", chunk[0], exc)
                     continue
-                if df is not None and not df.empty:
-                    chunk_frames.append((chunk, df))
-
-        for chunk, df in chunk_frames:
-            for raw_sym in chunk:
-                yf_sym = sym_to_yfsym[raw_sym]
-                try:
-                    if isinstance(df.columns, pd.MultiIndex):
-                        if yf_sym not in df.columns.get_level_values(-1):
+                if df is None or df.empty:
+                    continue
+                multi = isinstance(df.columns, pd.MultiIndex)
+                for raw_sym in chunk:
+                    yf_sym = raw_sym if raw_sym.endswith(".NS") else f"{raw_sym}.NS"
+                    try:
+                        sub = df[yf_sym] if multi else df
+                        sub = sub.dropna(how="all")
+                        if sub.empty:
                             continue
-                        sym_df = df.xs(yf_sym, axis=1, level=-1).dropna(how="all")
-                    else:
-                        sym_df = df.dropna(how="all")
-
-                    if sym_df.empty or "Close" not in sym_df:
+                        returned.add(raw_sym)
+                        if len(sub) >= MIN_HISTORY_ROWS:
+                            histories[raw_sym] = sub
+                    except Exception:
                         continue
+    log.info(
+        "Yahoo bulk history: %d/%d symbols with >=%d rows",
+        len(histories), len(symbols), MIN_HISTORY_ROWS,
+    )
+    return histories
 
-                    last = sym_df.iloc[-1]
-                    prev = sym_df.iloc[-2] if len(sym_df) > 1 else last
-                    last_price = _clean_number(last.get("Close"))
-                    prev_close = _clean_number(prev.get("Close"), last_price)
-                    if last_price is None:
-                        continue
 
-                    p_change = 0.0
-                    if prev_close and prev_close > 0:
-                        p_change = ((last_price - prev_close) / prev_close) * 100
+def _screen_universe(
+    symbols: list[str],
+    nifty_df: pd.DataFrame | None,
+    prefetched: dict[str, pd.DataFrame] | None = None,
+) -> list[tuple[str, float, pd.DataFrame]]:
+    """
+    Tier 1: technical-only screen over the whole universe — no per-symbol
+    HTTP beyond the chunked bulk history download.  Histories already
+    fetched during symbol resolution are reused; only the rest (the NSE
+    live symbols) are downloaded here.  Returns (symbol, technical_score,
+    history_df) tuples sorted best-first; the history is reused by Tier 2
+    so it is downloaded only once.
+    """
+    from core.features.technical import compute_technical_features, compute_technical_score
 
-                    quotes[raw_sym] = {
-                        "symbol":             raw_sym,
-                        "lastPrice":          last_price,
-                        "open":               _clean_number(last.get("Open"), last_price),
-                        "dayHigh":            _clean_number(last.get("High"), last_price),
-                        "dayLow":             _clean_number(last.get("Low"), last_price),
-                        "previousClose":      prev_close,
-                        "pChange":            round(p_change, 2),
-                        "totalTradedVolume":  _clean_number(last.get("Volume")),
-                        "yearHigh":           None,  # filled from t_high_52w at result time
-                        "yearLow":            None,
-                        "companyName":        raw_sym,
-                        "industry":           "",
-                        "index":              "YFINANCE",
-                        "fetched_at":         datetime.now().isoformat(),
-                    }
-                except Exception as exc:
-                    log.debug("Yahoo OHLCV parse failed for %s: %s", raw_sym, exc)
-
-    log.info("Yahoo bulk OHLCV: %d/%d symbols", len(quotes), len(symbols))
-
-    # ── Step 2: Enrich with fast_info (yearHigh/Low, companyName) ─────────────
-    # Process in parallel but cap workers to avoid throttling
-    def _enrich_one(raw_sym: str) -> None:
-        yf_sym = sym_to_yfsym.get(raw_sym, f"{raw_sym}.NS")
+    prefetched = prefetched or {}
+    histories = {s: prefetched[s] for s in symbols if s in prefetched}
+    missing = [s for s in symbols if s not in prefetched]
+    if missing:
+        histories.update(_bulk_download_histories(missing))
+    log.info(
+        "Tier-1 histories: %d/%d symbols (%d reused from symbol resolution)",
+        len(histories), len(symbols), len(symbols) - len(missing),
+    )
+    screened: list[tuple[str, float, pd.DataFrame]] = []
+    for sym, df in histories.items():
         try:
-            ticker = yf.Ticker(yf_sym)
-            fi = get_engine().call("yahoo", lambda: ticker.fast_info)
-
-            year_high = _clean_number(getattr(fi, "year_high", None))
-            year_low  = _clean_number(getattr(fi, "year_low", None))
-            live_price = _clean_number(getattr(fi, "last_price", None))
-
-            if raw_sym in quotes:
-                if year_high:
-                    quotes[raw_sym]["yearHigh"] = year_high
-                if year_low:
-                    quotes[raw_sym]["yearLow"] = year_low
-                # Use live price if available (during market hours)
-                if live_price and live_price > 0:
-                    quotes[raw_sym]["lastPrice"] = live_price
-            elif live_price and live_price > 0:
-                # Symbol wasn't in bulk download — build from fast_info
-                prev = _clean_number(getattr(fi, "previous_close", None), live_price)
-                p_chg = ((live_price - prev) / prev * 100) if prev and prev > 0 else 0.0
-                quotes[raw_sym] = {
-                    "symbol":            raw_sym,
-                    "lastPrice":         live_price,
-                    "open":              _clean_number(getattr(fi, "open", None), live_price),
-                    "dayHigh":           _clean_number(getattr(fi, "day_high", None), live_price),
-                    "dayLow":            _clean_number(getattr(fi, "day_low", None), live_price),
-                    "previousClose":     prev,
-                    "pChange":           round(p_chg, 2),
-                    "totalTradedVolume": _clean_number(getattr(fi, "last_volume", None)),
-                    "yearHigh":          year_high,
-                    "yearLow":           year_low,
-                    "companyName":       raw_sym,
-                    "industry":          "",
-                    "index":             "YFINANCE",
-                    "fetched_at":        datetime.now().isoformat(),
-                }
+            tech = compute_technical_features(df, nifty_df)
+            screened.append((sym, compute_technical_score(tech), df))
         except Exception as exc:
-            log.debug("fast_info enrich failed for %s: %s", raw_sym, exc)
+            log.debug("Tier-1 screen failed for %s: %s", sym, exc)
+    screened.sort(key=lambda item: item[1], reverse=True)
+    return screened
 
-    # Only symbols the bulk download missed get a per-symbol fast_info call.
-    # For everything else the 52-week range comes from Tier-1 history
-    # (t_high_52w) at result time — mass enrichment would only burn the
-    # rate-limit budget that the quote/history downloads need.
-    enrich_targets = [s for s in symbols if s not in quotes]
-    if enrich_targets:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(enrich_targets))) as ex:
-            list(ex.map(_enrich_one, enrich_targets))
 
-    log.info("Yahoo quotes ready: %d/%d symbols (with 52w data)", len(quotes), len(symbols))
-    return quotes
+def _quote_from_history(raw_sym: str, df: pd.DataFrame) -> dict | None:
+    """Build a quote payload from the last two rows of a daily OHLCV frame."""
+    if df is None or df.empty or "Close" not in df:
+        return None
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) > 1 else last
+    last_price = _clean_number(last.get("Close"))
+    prev_close = _clean_number(prev.get("Close"), last_price)
+    if last_price is None:
+        return None
+
+    p_change = 0.0
+    if prev_close and prev_close > 0:
+        p_change = ((last_price - prev_close) / prev_close) * 100
+
+    return {
+        "symbol":             raw_sym,
+        "lastPrice":          last_price,
+        "open":               _clean_number(last.get("Open"), last_price),
+        "dayHigh":            _clean_number(last.get("High"), last_price),
+        "dayLow":             _clean_number(last.get("Low"), last_price),
+        "previousClose":      prev_close,
+        "pChange":            round(p_change, 2),
+        "totalTradedVolume":  _clean_number(last.get("Volume")),
+        "yearHigh":           None,  # filled from t_high_52w at result time
+        "yearLow":            None,
+        "companyName":        raw_sym,
+        "industry":           "",
+        "index":              "YFINANCE",
+        "fetched_at":         datetime.now().isoformat(),
+    }
+
+
+def _yahoo_quotes_and_histories(
+    symbols: list[str],
+) -> tuple[dict[str, dict], dict[str, pd.DataFrame]]:
+    """
+    Quotes for symbols NSE live didn't cover, taken from the same 1y bulk
+    download Tier 1 screens on — so each symbol is fetched from Yahoo once
+    per run instead of twice (a 5d quote pass, then 1y again for Tier 1).
+    Symbols without MIN_HISTORY_ROWS of history get no quote: Tier 1 could
+    not screen them anyway.
+    """
+    histories = _bulk_download_histories(symbols)
+    quotes: dict[str, dict] = {}
+    for raw_sym, df in histories.items():
+        try:
+            quote = _quote_from_history(raw_sym, df)
+        except Exception as exc:
+            log.debug("Yahoo quote parse failed for %s: %s", raw_sym, exc)
+            continue
+        if quote:
+            quotes[raw_sym] = quote
+    log.info("Yahoo quotes from history: %d/%d symbols", len(quotes), len(symbols))
+    return quotes, {s: histories[s] for s in quotes}
 
 
 def _store_ohlcv(symbol: str, df: pd.DataFrame) -> None:
@@ -614,19 +541,24 @@ def _fetch_broad_nse_symbols() -> list[str]:
     return []
 
 
-def _resolve_symbols_and_quotes(session) -> tuple[dict[str, dict], str]:
+def _resolve_symbols_and_quotes(
+    session,
+) -> tuple[dict[str, dict], str, dict[str, pd.DataFrame]]:
     """
     Build the broadest possible stock universe (~2000 stocks).
 
     Strategy (supplementary, not fallback):
         1. Start with NSE live index quotes (~350 stocks with best data)
         2. Supplement with bhavcopy / NSE equity listing symbols
-           → fetch Yahoo quotes for the additional symbols
+           → fetch 1y Yahoo history for the additional symbols and take
+             their quotes from it
         3. If everything external fails, use DuckDB lake cache
 
-    Returns (quotes_dict, source_label).
+    Returns (quotes_dict, source_label, histories) — the histories are the
+    Yahoo downloads, handed on to Tier 1 so they aren't fetched again.
     """
     quotes: dict[str, dict] = {}
+    histories: dict[str, pd.DataFrame] = {}
     sources_used: list[str] = []
 
     # ── Step 1: NSE live index quotes (primary — best data quality) ───────────
@@ -682,7 +614,7 @@ def _resolve_symbols_and_quotes(session) -> tuple[dict[str, dict], str]:
             "Fetching Yahoo quotes for %d supplementary symbols (target: %d total)",
             len(additional_symbols), len(quotes) + len(additional_symbols),
         )
-        yahoo_quotes = _fallback_quotes_from_yfinance(additional_symbols)
+        yahoo_quotes, histories = _yahoo_quotes_and_histories(additional_symbols)
         if yahoo_quotes:
             quotes.update(yahoo_quotes)
             sources_used.append(f"yahoo_supplement({len(yahoo_quotes)})")
@@ -694,7 +626,7 @@ def _resolve_symbols_and_quotes(session) -> tuple[dict[str, dict], str]:
         if cached_symbols:
             cached_symbols = cached_symbols[:MAX_SYMBOL_COUNT]
             log.info("Lake cached symbols: %d — fetching via Yahoo", len(cached_symbols))
-            quotes = _fallback_quotes_from_yfinance(cached_symbols)
+            quotes, histories = _yahoo_quotes_and_histories(cached_symbols)
             if quotes:
                 sources_used.append(f"lake_cache({len(quotes)})")
 
@@ -706,10 +638,10 @@ def _resolve_symbols_and_quotes(session) -> tuple[dict[str, dict], str]:
             "Symbol resolution complete: %d stocks [%s]",
             len(quotes), source_tag,
         )
-        return quotes, source_tag
+        return quotes, source_tag, histories
 
     log.error("All symbol resolution sources failed — no stocks to analyse")
-    return {}, "none"
+    return {}, "none", {}
 
 
 def run_modular_analysis(limit: int | None = None) -> list[dict]:
@@ -730,7 +662,7 @@ def run_modular_analysis(limit: int | None = None) -> list[dict]:
         session = _make_session()
 
         # ── Dynamic symbol resolution (no hardcoded fallback) ─────────────────
-        quotes, source_label = _resolve_symbols_and_quotes(session)
+        quotes, source_label, histories = _resolve_symbols_and_quotes(session)
         if not quotes:
             log.error("No quotes obtained from any source — aborting pipeline")
             return []
@@ -751,7 +683,8 @@ def run_modular_analysis(limit: int | None = None) -> list[dict]:
         nifty_df = _download_history("^NSEI")
 
         # ── Tier 1: cheap technical screen over the full universe ──────────────
-        screened = _screen_universe(symbols, nifty_df)
+        screened = _screen_universe(symbols, nifty_df, prefetched=histories)
+        del histories  # screened now holds the ones still needed
         screened_count = len(screened)
         deep_count = limit if limit else DEEP_ANALYSIS_COUNT
         shortlist = screened[:deep_count]
