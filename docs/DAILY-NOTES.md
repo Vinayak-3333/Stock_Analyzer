@@ -60,7 +60,8 @@ institutional-score bug that turned up while mapping the pipeline.
 | `0634c41` | Single Yahoo history download per run (DN-24) |
 | `2edeac6` | FII/DII stored each run so the 3-day window is real (DN-25) |
 | `726bb3d` | Merged to `master`; CI build green; **deployed to the VM 22:03 IST** (image `589df4c4`) — both fixes confirmed in the container, 09:15/15:30 jobs re-armed, public health OK, `/auth/me` 401 |
-| `9d4317d` | Architecture diagram added as [`docs/ARCHITECTURE.html`](ARCHITECTURE.html) (on `alt-approach`) |
+| `9d4317d` | Architecture diagram added as [`docs/ARCHITECTURE.html`](ARCHITECTURE.html) |
+| `48c6fb2` | Merged `alt-approach` → `master` (docs only: today's notes + the diagram) and pushed. CI rebuilt the images (run `40378066400`) with no code change, so the VM was left as is |
 
 Also: an architecture map of the pipeline (sources → stages → stores →
 feedback loop, with measured timings). The repo copy is
