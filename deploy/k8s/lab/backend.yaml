@@ -84,14 +84,19 @@ spec:
             httpGet: { path: /api/health, port: 8000 }
             periodSeconds: 5
             failureThreshold: 36            # up to 3 min for first start
-          readinessProbe:
-            httpGet: { path: /api/health, port: 8000 }
-            periodSeconds: 15
+          # Lenient on purpose: a run saturates the CPU in the same process, so
+          # /api/health can answer slowly mid-run. A tight probe would restart
+          # the pod and kill the run it is waiting on. 10 x 30s = 5 min.
           livenessProbe:
             httpGet: { path: /api/health, port: 8000 }
             periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 10
+          readinessProbe:
+            httpGet: { path: /api/health, port: 8000 }
+            periodSeconds: 15
             timeoutSeconds: 10
-            failureThreshold: 4
+            failureThreshold: 8
       volumes:
         - name: data
           persistentVolumeClaim:
