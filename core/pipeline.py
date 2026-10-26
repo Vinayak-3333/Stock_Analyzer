@@ -212,6 +212,11 @@ def _quote_from_history(raw_sym: str, df: pd.DataFrame) -> dict | None:
     """Build a quote payload from the last two rows of a daily OHLCV frame."""
     if df is None or df.empty or "Close" not in df:
         return None
+    # Multi-ticker downloads can end in a row with Volume but no Close (seen
+    # 2026-10-27 for the previous session); quote from the last priced row.
+    df = df.dropna(subset=["Close"])
+    if df.empty:
+        return None
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else last
     last_price = _clean_number(last.get("Close"))
