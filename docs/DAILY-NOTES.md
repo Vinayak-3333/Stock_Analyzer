@@ -91,12 +91,47 @@ starts with its owning project's number).
   Checked inside the pod: no `GMAIL_*` vars, no `/app/.env`. Not fixed.
 - Lab run (01:30–01:37 IST, 357-symbol universe): 7m17s, peak 345 Mi, no
   restarts. **Not comparable** with the VM's 39 min because of the bug above.
+- **Full lab run with the fix (02:07–02:15 IST) confirms it end to end** on
+  the image the live VM now runs: Yahoo quotes 1,453/1,647, universe 1,806,
+  Tier 1 1,797, Tier 2 400/400, `FII/DII window has 1 of 3`. **7m40s**, peak
+  325 Mi, no restarts. 1,806 rather than 2,000 is DN-24's < 60-row skip, not a
+  loss: Tier 2 still gets its full 400. One `database is locked` for
+  `SHRADDHA.NS` came from yfinance's own sqlite cache; the run carried on.
 - NSE (live quotes, bhavcopy, FII/DII) answers from the GCP VM's address —
   it wasn't certain a cloud IP would be allowed.
 - k3s's API (6443) listens on all interfaces. The GCP default firewall blocks
   it publicly (checked: timeout on the external IP; `401` over Tailscale), but
   `default-allow-internal` lets other VMs in the VPC reach it. Accepted for a lab.
 - Traefik's Helm install fails twice on first boot, then succeeds — normal.
+
+### `e2-micro` (live) vs `e2-medium` (lab)
+Not like-for-like yet: the live number is the old code (duplicate download),
+at market open, from an IP Yahoo already sees twice a day; the lab ran at
+2 AM from a fresh IP. Today's 09:15 run gives the fair micro number.
+
+| | `e2-micro` | `e2-medium` |
+|---|---|---|
+| Sustained CPU | 0.25 vCPU (bursts to 2, briefly) | 1 vCPU (bursts to 2) |
+| Memory | 1 GB + 2 GB swap | 4 GB |
+| ~Cost, Mumbai | ~$7–8/mo (~₹650) | ~$27–30/mo (~₹2,400) |
+| Free after the trial | yes, in a US region | no |
+
+| Stage | Live 26 Oct (old code) | Lab 27 Oct (fixed) | Speed-up |
+|---|---|---|---|
+| Yahoo 5d quotes (duplicate, now removed) | 10m08s | — | removed by DN-24 |
+| Yahoo 1y histories | 13m48s | 3m25s + 0m47s | ~3× |
+| Tier 1 scoring (CPU-bound) | 4m34s | 0m33s | **~8×** |
+| Tier 2, top 400 | 7m58s | 2m16s | ~3.5× |
+| **Total** | **38m55s** | **7m40s** | ~5× |
+
+The 40-minute run outlasts the micro's burst credits, after which it is held to
+0.25 vCPU. That's why CPU-bound Tier 1 shows the largest gap, while
+the network-bound stages gain less. Expected micro time with DN-24: **~25–30
+min** (estimate). Peak memory 325 Mi, so 4 GB is far more than needed.
+Options if speed matters: `e2-small` (0.5 vCPU, 2 GB, ~₹1,250/mo) as a middle
+step, or run the analysis on the k8s cluster. Decision deferred until the
+09:15 number is in. Keep the micro if 25–30 min is acceptable, since it can be
+free after the region move.
 
 ### <a id="dn-26"></a>DN-26 — Kubernetes on a separate k3s lab VM
 The user's rule: **don't disturb the live deployment, its scheduler or its
@@ -124,8 +159,8 @@ is a `SCHEDULER_ENABLED` flag or the CronJob split.
 - **Check 09:15 on the live VM** — the first run with all three fixes:
   `Yahoo quotes from history` should be ~1,400+/1,647, universe ~2,000; run
   time vs the ~29 min estimate; `FII/DII window has N of 3`.
-- Re-run the lab with the fixed image for a real 2,000-symbol timing and peak
-  memory on 4 GB.
+- Compare the 09:15 micro time with the lab's 7m40s, then decide on the
+  machine size (keep micro / `e2-small` / analysis on k8s).
 - **Tailscale key expiry** for `stockradar-k8s` (expires 2027-04-24) — disable
   in the admin console. The user's action.
 - `alt-approach` notes commit for this entry needs pushing; `master` lags by it.
