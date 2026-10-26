@@ -59,7 +59,7 @@ institutional-score bug that turned up while mapping the pipeline.
 |---|---|
 | `0634c41` | Single Yahoo history download per run (DN-24) |
 | `2edeac6` | FII/DII stored each run so the 3-day window is real (DN-25) |
-| `726bb3d` | Merged to `master` and pushed — CI image build triggered; VM pull pending at time of writing |
+| `726bb3d` | Merged to `master`; CI build green; **deployed to the VM 22:03 IST** (image `589df4c4`) — both fixes confirmed in the container, 09:15/15:30 jobs re-armed, public health OK, `/auth/me` 401 |
 
 Also: an architecture map of the pipeline (sources → stages → stores →
 feedback loop, with measured timings) published as a private claude.ai page:
@@ -129,9 +129,10 @@ FII-selling/DII-buying divergence flag becomes meaningful (true on today's
 live data). The window fills over the first 3 trading days after deploy.
 
 ### Open
-- **Confirm the deploy**: CI build for `726bb3d`, then `docker compose pull`
-  + restart on the VM, then check Tuesday 09:15 — run time vs the ~29 min
-  estimate, and the "FII/DII window has N of 3" log line.
+- **Check Tuesday 09:15**, the first run with both fixes: run time vs the
+  ~29 min estimate, and the "FII/DII window has N of 3" log line.
+- VM deploy gotcha: the compose dir is under `/home/vinnu_smath333`, which
+  the gcloud SSH user can't enter — run compose via `sudo bash -c "cd … && …"`.
 - **Before ~23 Jan 2027**: upgrade the billing account *and* move the VM to a
   US free region in the same step (keep the `stockradar` tailnet name so the
   URL survives). Doing it earlier gains nothing while credit pays.
