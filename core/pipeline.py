@@ -16,6 +16,7 @@ import math
 import os
 import random
 import time
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,27 @@ from core.events import EventSeverity, EventType, PipelineStage, StockEvent, pub
 from core.events.engine import publish_risk_stage_events, publish_symbol_stage_events
 
 log = logging.getLogger("stockradar.pipeline")
+
+# yfinance still calls sort_index(inplace=True), which pandas 3.1 deprecates —
+# one warning per downloaded frame, ~2,000 per run, none from our code.
+# Scoped to yfinance's own call sites so the same deprecation in our code
+# still shows.
+warnings.filterwarnings(
+    "ignore",
+    message=r"The inplace keyword in DataFrame\.sort_index is deprecated",
+    module=r"yfinance",
+)
+
+# yfinance creates its tz-cache folder lazily with a non-idempotent makedirs.
+# Parallel download threads race on the first run, the loser gets "File
+# exists", and yfinance then disables the tz cache for the process lifetime.
+# Creating the folder before any thread touches it removes the race.
+_YF_CACHE_DIR = Path.home() / ".cache" / "py-yfinance"
+try:
+    _YF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    yf.set_tz_cache_location(str(_YF_CACHE_DIR))
+except OSError as e:
+    log.warning("yfinance tz cache unavailable at %s: %s", _YF_CACHE_DIR, e)
 
 # Tier-2 worker pool: sized well above the old 8 because per-host limits now
 # live in the fetch engine (core/fetch) — extra workers wait on host gates

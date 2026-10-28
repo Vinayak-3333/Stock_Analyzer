@@ -101,9 +101,21 @@ universe grows, or if the analysis moves to the k8s cluster.
   `runs.email_sent` column was also wrong before: it was `True` for every run
   that tried to email. Tested with mocked SMTP: no credentials, auth failure
   and network error give `False`; success gives `True`.
+- **yfinance log noise silenced** (`core/pipeline.py`), both from yfinance
+  1.7.0, not our code:
+  - `sort_index(inplace=True)` deprecation (pandas 3.1, `yfinance/utils.py`):
+    **8,086** copies in the live container's log since 27 Oct. Ignored by a
+    filter scoped to `module="yfinance"` on that message only — the same
+    deprecation raised from our code still shows (tested both ways).
+  - `TzCache ... File exists` was **not just noise**: yfinance creates its
+    cache folder with a non-idempotent `makedirs`, parallel download threads
+    race on it on the first run after a container start, and the loser
+    **disables the tz cache for the rest of the process** — extra Yahoo
+    lookups every run until restart. Fixed by creating the folder and calling
+    `yf.set_tz_cache_location` at import, before any thread. Tested with a
+    fresh folder and 16 concurrent threads: all got the real cache.
 
 ### Open
-- Quiet the `sort_index` / `TzCache` log noise.
 - Region move + billing upgrade before 2027-01-23.
 
 ---
