@@ -29,3 +29,14 @@ resources:
   - backend.yaml
   - frontend.yaml
   - ingress.yaml
+
+# The build the lab runs. CI publishes :<sha> for every master and
+# alt-approach push. To move the lab:
+#   cd deploy/k8s/lab && kustomize edit set image \
+#     ghcr.io/vinayak-3333/stock-analyzer-backend:<sha> \
+#     ghcr.io/vinayak-3333/stock-analyzer-frontend:<sha>
+images:
+  - name: ghcr.io/vinayak-3333/stock-analyzer-backend
+    newTag: 672b285a57aa6074e1b58991f80b16daf33598c4
+  - name: ghcr.io/vinayak-3333/stock-analyzer-frontend
+    newTag: 672b285a57aa6074e1b58991f80b16daf33598c4

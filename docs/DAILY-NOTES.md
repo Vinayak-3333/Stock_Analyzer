@@ -114,9 +114,33 @@ universe grows, or if the analysis moves to the k8s cluster.
     lookups every run until restart. Fixed by creating the folder and calling
     `yf.set_tz_cache_location` at import, before any thread. Tested with a
     fresh folder and 16 concurrent threads: all got the real cache.
+- **`SCHEDULER_ENABLED`** (`backend/api.py`, default `true`, so the live VM
+  is unchanged). `false` skips the 09:15/15:30 jobs; the scheduler still
+  starts so `/api/status` keeps its shape and manual runs still work. The lab
+  now sets it instead of DN-27's `add_job` monkeypatch, and runs the image's
+  own CMD. Startup log: `Scheduler started with no jobs — SCHEDULER_ENABLED=false`.
+- **CI builds `alt-approach` too, SHA tag only.** Correction to DN-27: CI
+  already tagged `:<sha>` on every `master` build (24 tags in ghcr); the real
+  gap was that branch commits never got an image. Now `master` → `:latest` +
+  `:<sha>`, `alt-approach` → `:<sha>` only. Docs, `*.md` and `deploy/k8s/`
+  changes no longer trigger a build. First branch build `672b285`, run
+  `40725373944`; `:latest` verified unmoved (backend still `26785ec5`, what
+  the live VM runs).
+- **Lab pinned to `672b285`** via kustomize `images:`, `IfNotPresent`
+  instead of `Always`. So the lab now has today's email and yfinance fixes.
+  The 894 MB backend image took **5 min** to pull on the lab VM — the
+  rollout's default timeouts are too short for a fresh SHA; allow ~6 min.
+
+### Found
+- Git Bash `curl` on this laptop returns `000` (exit 23/43) whenever `-o` or
+  `-w` is used, although the request succeeds. Probe with `curl -sI` instead.
 
 ### Open
 - Region move + billing upgrade before 2027-01-23.
+- Phase 0 of the Kubernetes plan: scheduler → CronJob (the flag is the first
+  half), shared run lock, shared tables → Postgres. The plan itself is not
+  written down anywhere yet — only in these notes.
+- Lab VM `stockradar-k8s` left **running** (~₹80/day).
 
 ---
 
