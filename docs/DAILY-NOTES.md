@@ -47,6 +47,55 @@ future you) can pick up without re-deriving context.
 | [DN-25](#dn-25) | 2026-10-26 | Store FII/DII every run, keyed by NSE's trading date, not `date.today()` |
 | [DN-26](#dn-26) | 2026-10-27 | Kubernetes on a separate k3s lab VM; the live VM is not touched until cutover |
 | [DN-27](#dn-27) | 2026-10-27 | Lab backend strips the scheduler at startup and has no Gmail secret, rather than a code flag or a custom image |
+| [DN-28](#dn-28) | 2026-10-28 | Keep the live VM on `e2-micro` — ~27 min per run is acceptable for two runs a day |
+
+---
+
+## 2026-10-28
+
+Measured the live `e2-micro` with the DN-24 fix across all four scheduled
+runs since the 01:58 IST deploy on 27 Oct, closing the decision deferred
+yesterday. Read-only: `docker logs` on the VM, nothing changed there.
+
+### Measured
+Stage boundaries from the backend log markers (`Fetching Yahoo quotes for N
+supplementary symbols` → `Yahoo bulk history` → `Tier-1 histories` → `Tier 1:
+screened` → `Tier 2 finished` → `Analysis job done`).
+
+| Stage | 27 Oct 09:15 | 27 Oct 15:30 | 28 Oct 09:15 | 28 Oct 15:30 | Lab 27 Oct |
+|---|---|---|---|---|---|
+| Yahoo 1y histories, supplement | 7m56s | 7m18s | 10m12s | 9m11s | 3m25s |
+| Yahoo 1y histories, NSE-live symbols | 1m45s | 4m18s | 2m36s | 2m25s | 0m47s |
+| Tier 1 scoring (CPU-bound) | 5m13s | 4m58s | 5m27s | 4m44s | 0m33s |
+| Tier 2, top 400 | 5m55s | 7m42s | 7m22s | 7m09s | 2m16s |
+| **Total** | **22m47s** | **26m42s** | **28m30s** | **26m43s** | **7m40s** |
+| Universe | 1,807 | 1,809 | 1,803 | 1,793 | 1,806 |
+
+All four fired on time, Tier 2 got 400/400 every time, and the universe is
+back at ~1,800 (vs 357 with the NaN-Close bug). Down from 38m55s on the old
+code. Tier 1 is ~9× slower than the lab, the network-bound stages 2–3×,
+matching the burst-credit explanation from yesterday.
+
+### Found
+- **FII/DII accumulating as designed (DN-25):** the window went from
+  `1 of 3` on 27 Oct to `2 of 3` on 28 Oct.
+- VM at rest: 451 Mi RAM used of 953, **421 Mi in swap**. Tight but stable.
+- Log noise: a pandas warning at `quotes.sort_index(inplace=True)` repeats
+  many times per run, and yfinance logs a `TzCache` folder warning
+  (`File exists`). Both harmless; they bury the stage markers. Not fixed.
+
+### <a id="dn-28"></a>DN-28 — Keep the live VM on `e2-micro`
+~27 min (22–29 min range) is well inside the gap between two runs a day, and
+nothing reads results mid-run. `e2-small` would roughly halve Tier 1 for
+~₹1,250/mo; `e2-medium` gets 7m40s for ~₹2,400/mo. Neither buys anything the
+user needs, while the micro can be free after the planned move to a US region
+before the trial ends (~2027-01-23). Revisit if `DEEP_ANALYSIS_COUNT` or the
+universe grows, or if the analysis moves to the k8s cluster.
+
+### Open
+- "Email sent" is still logged unconditionally (see 2026-10-27).
+- Quiet the `sort_index` / `TzCache` log noise.
+- Region move + billing upgrade before 2027-01-23.
 
 ---
 
