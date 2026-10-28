@@ -45,6 +45,7 @@ from core.collectors.nse import (
     collect_all_quotes,
     fetch_cached_symbols_from_lake,
     fetch_equity_symbols_from_bhavcopy,
+    fetch_traded_quotes,
     save_known_symbols_to_lake,
 )
 from core.features.regime import compute_regime_features
@@ -575,10 +576,11 @@ def _resolve_symbols_and_quotes(
     Build the broadest possible stock universe (~2000 stocks).
 
     Strategy (supplementary, not fallback):
-        1. Start with NSE live index quotes (~350 stocks with best data)
+        1. Start with NSE live index quotes (~760 stocks with best data)
         2. Supplement with bhavcopy / NSE equity listing symbols
-           → fetch 1y Yahoo history for the additional symbols and take
-             their quotes from it
+           → fetch 1y Yahoo history for the additional symbols, quote them
+             from NSE's live traded-stocks feed, and from the history only
+             where NSE has no row
         3. If everything external fails, use DuckDB lake cache
 
     Returns (quotes_dict, source_label, histories) — the histories are the
@@ -642,9 +644,21 @@ def _resolve_symbols_and_quotes(
             len(additional_symbols), len(quotes) + len(additional_symbols),
         )
         yahoo_quotes, histories = _yahoo_quotes_and_histories(additional_symbols)
-        if yahoo_quotes:
-            quotes.update(yahoo_quotes)
-            sources_used.append(f"yahoo_supplement({len(yahoo_quotes)})")
+
+        # 2c: Live prices for the supplementary symbols. Their Yahoo quote is
+        # the last row of a daily history — up to a session old when that
+        # row is blank (DN-24). NSE's traded-stocks feed has today's price
+        # for nearly all of them in one call; Yahoo's history is still what
+        # Tier 1 screens on, and its quote stays as the fallback.
+        traded = fetch_traded_quotes(session) if yahoo_quotes else {}
+        live = [s for s in yahoo_quotes if s in traded]
+        for sym in live:
+            yahoo_quotes[sym].update(traded[sym])
+        if live:
+            sources_used.append(f"nse_traded({len(live)})")
+        if len(yahoo_quotes) > len(live):
+            sources_used.append(f"yahoo_supplement({len(yahoo_quotes) - len(live)})")
+        quotes.update(yahoo_quotes)
 
     # ── Step 3: If we still have nothing, try lake cache ──────────────────────
     if not quotes:

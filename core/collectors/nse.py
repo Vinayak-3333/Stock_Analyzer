@@ -43,9 +43,15 @@ _UA         = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-# ── Broad + Sector indices for dynamic stock universe (~300-500 unique) ────────
+# ── Broad + Sector indices for dynamic stock universe (~760 unique) ────────────
+# Index quotes are the richest NSE gives (company, industry, 52w range). Every
+# other traded stock still gets a live price from fetch_traded_quotes().
 NSE_INDEX_MAP = {
-    # Broad market (core coverage — ~300 unique stocks)
+    # Broad market. NIFTY 500 + SMALLCAP 500 took coverage from 353 to 763
+    # (2026-10-29). NSE answers this endpoint for only some indices: TOTAL
+    # MARKET, MICROCAP 250 and most strategy indices return no rows.
+    "NIFTY 500":           "NIFTY 500",
+    "NIFTY SMALLCAP 500":  "NIFTY SMALLCAP 500",
     "NIFTY 50":            "NIFTY 50",
     "NIFTY NEXT 50":       "NIFTY NEXT 50",
     "NIFTY MIDCAP 50":     "NIFTY MIDCAP 50",
@@ -270,6 +276,47 @@ def collect_all_quotes(session: requests.Session = None) -> dict:
 
     log.info("Collected %d live quotes", len(all_quotes))
     return all_quotes
+
+
+# Trade-to-trade (BE) stocks are real companies too; the other series in this
+# feed are bonds, govt securities, REIT/InvIT units and SME boards.
+_TRADED_SERIES = ("EQ", "BE")
+
+
+def fetch_traded_quotes(session: requests.Session = None) -> dict:
+    """
+    Live price for every stock traded today, in one call — NSE's "Stocks
+    Traded" feed (~2,700 EQ + ~200 BE). Thinner than index quotes: no
+    open/high/low, 52w range, company name or industry. Volume arrives in
+    lakhs and is converted to shares to match the index feed.
+
+    Returns {symbol: {lastPrice, previousClose, pChange, totalTradedVolume,
+    index, fetched_at}}; {} if the call fails.
+    """
+    if session is None:
+        session = _make_session()
+    data = _nse_get(session, "live-analysis-stocksTraded")
+    rows = ((data or {}).get("total") or {}).get("data") or []
+
+    quotes = {}
+    for r in rows:
+        sym, series = r.get("symbol"), r.get("series")
+        if not sym or series not in _TRADED_SERIES or not r.get("lastPrice"):
+            continue
+        # A symbol listed in both series keeps its EQ row.
+        if sym in quotes and series != "EQ":
+            continue
+        volume_lakhs = r.get("totalTradedVolume")
+        quotes[sym] = {
+            "lastPrice":         r.get("lastPrice"),
+            "previousClose":     r.get("previousClose"),
+            "pChange":           r.get("pchange"),
+            "totalTradedVolume": round(volume_lakhs * 100_000) if volume_lakhs is not None else None,
+            "index":             "NSE_TRADED",
+            "fetched_at":        datetime.now().isoformat(),
+        }
+    log.info("Collected %d traded-stock quotes", len(quotes))
+    return quotes
 
 
 # ── 2. Delivery Data ──────────────────────────────────────────────────────────
