@@ -99,6 +99,16 @@ body::before {
 .badge.neutral  { background: var(--blue-dim);  color: var(--blue);  border: 1px solid var(--blue);  }
 .badge.running  { background: var(--yellow-dim); color: var(--yellow); border: 1px solid var(--yellow); animation: pulse 1.5s infinite; }
 .last-update { font-size: 11px; color: var(--text-3); font-family: var(--mono); }
+.live-update {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--green); font-family: var(--mono);
+  background: var(--green-dim); border: 1px solid var(--green);
+  padding: 5px 12px; border-radius: 20px;
+}
+.live-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--green);
+  animation: pulse 1.5s infinite;
+}
 .next-run {
   display: flex; align-items: center; gap: 6px;
   font-size: 11px; color: var(--text-2); font-family: var(--mono);

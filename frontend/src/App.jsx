@@ -38,6 +38,17 @@ api.interceptors.request.use(config => {
 const fmt = (n, d=2) => n != null ? Number(n).toFixed(d) : '—'
 const fmtPct = n => n != null ? `${n > 0 ? '+' : ''}${fmt(n)}%` : '—'
 const fmtPrice = n => n != null ? `₹${Number(n).toLocaleString('en-IN', {minimumFractionDigits:2,maximumFractionDigits:2})}` : '—'
+// NSE timestamps arrive as naive IST ISO strings. Today → "14:35:12";
+// an earlier session → "28 Oct 16:00", so a stale price never reads as live.
+const fmtAsOf = iso => {
+  if (!iso) return null
+  const t = new Date(iso)
+  if (isNaN(t)) return null
+  const sameDay = t.toDateString() === new Date().toDateString()
+  return sameDay
+    ? t.toLocaleTimeString('en-IN', { hour12: false })
+    : t.toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })
+}
 const scoreColor = s => s >= 75 ? 'var(--green)' : s >= 55 ? 'var(--blue)' : s <= 25 ? 'var(--red)' : 'var(--text-2)'
 const newsScoreColor = s => s >= 60 ? 'var(--green)' : s <= 40 ? 'var(--red)' : 'var(--text-3)'
 const getNewsScore = s => {
@@ -346,7 +357,9 @@ function StockModal({ stock, onClose }) {
         : '—',
       cls: stock.analyst_rating <= 2 ? 'pos' : stock.analyst_rating >= 4 ? 'neg' : ''
     },
-    { k:'Delivery %',      v: stock.delivery_pct ? `${fmt(stock.delivery_pct,1)}%` : '—' },
+    { k:'Price as of',     v: stock.price_as_of ? `NSE ${fmtAsOf(stock.price_as_of)}` : 'Yahoo daily close' },
+    // NSE publishes delivery data only after the close.
+    { k:'Delivery % (prev. session)', v: stock.delivery_pct ? `${fmt(stock.delivery_pct,1)}%` : '—' },
     { k:'52W High',        v: fmtPrice(stock.high_52w) },
     { k:'52W Low',         v: fmtPrice(stock.low_52w) },
     { k:'% from High',     v: fmtPct(-stock.pct_from_52w_high), cls:'neg' },
@@ -835,6 +848,7 @@ export default function App() {
 
   const results = latest?.results || []
   const run     = latest?.run
+  const live    = latest?.live   // intraday live refresh of this run, if any
   const buys    = results.filter(r => r.signal === 'BUY')
   const sells   = results.filter(r => r.signal === 'SELL')
   const watches = results.filter(r => r.signal === 'WATCH')
@@ -903,7 +917,13 @@ export default function App() {
               <Clock size={12}/> next run in {fmtEta(nextRunAt - now)}
             </div>
           )}
-          {lastTime && <div className="last-update">Last run: {lastTime} IST</div>}
+          {live?.as_of && (
+            <div className="live-update"
+                 title={`Prices, technicals and scores re-scored on live NSE data at ${fmtAsOf(live.refreshed_at)} IST`}>
+              <span className="live-dot"/> Live · NSE {fmtAsOf(live.as_of)}
+            </div>
+          )}
+          {lastTime && <div className="last-update">Deep analysis: {lastTime} IST</div>}
           <button className="trigger-btn" onClick={triggerRun} disabled={isRunning || backendOff}>
             {isRunning
               ? <><RefreshCw size={14} style={{animation:'spin 1s linear infinite'}}/> Running...</>

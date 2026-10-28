@@ -49,7 +49,7 @@ from core.collectors.nse import (
     fetch_traded_quotes,
     save_known_symbols_to_lake,
 )
-from core.features.live_bar import quote_from_index_row, with_live_bar
+from core.features.live_bar import parse_nse_time, quote_from_index_row, with_live_bar
 from core.features.regime import compute_regime_features
 from core.features.store import compute_all_features
 from core.fetch import get_engine
@@ -61,6 +61,10 @@ from core.events import EventSeverity, EventType, PipelineStage, StockEvent, pub
 from core.events.engine import publish_risk_stage_events, publish_symbol_stage_events
 
 log = logging.getLogger("stockradar.pipeline")
+
+# Histories of the last deep run's shortlist, by bare symbol. In memory only:
+# after a restart the live refresh reads raw_ohlcv from the lake instead.
+DEEP_RUN_HISTORIES: dict[str, pd.DataFrame] = {}
 
 # yfinance still calls sort_index(inplace=True), which pandas 3.1 deprecates —
 # one warning per downloaded frame, ~2,000 per run, none from our code.
@@ -380,8 +384,10 @@ def _regime_code(regime: dict | None) -> int:
     return 1
 
 
-def _score_inputs(features: dict, quote: dict, market: dict) -> tuple[dict, dict, dict, dict, dict, dict]:
-    technical = {
+def _technical_inputs(features: dict) -> dict:
+    """The technical_score() inputs, from t_-prefixed features. Shared with
+    the live refresh, which recomputes only this factor intraday."""
+    return {
         "rsi": features.get("t_rsi_14"),
         "macd_hist": features.get("t_macd_histogram"),
         "adx": features.get("t_adx"),
@@ -395,6 +401,10 @@ def _score_inputs(features: dict, quote: dict, market: dict) -> tuple[dict, dict
         "hh_hl_count": features.get("t_hh_hl_count"),
         "atr_pct": features.get("t_atr_pct"),
     }
+
+
+def _score_inputs(features: dict, quote: dict, market: dict) -> tuple[dict, dict, dict, dict, dict, dict]:
+    technical = _technical_inputs(features)
     fundamental = {
         "roe": features.get("f_roe"),
         "roce": features.get("f_roce"),
@@ -452,30 +462,21 @@ def _signal(score: float) -> str:
     return "SELL"
 
 
-def _result_from_features(symbol: str, features: dict, quote: dict, score_result: dict) -> dict:
-    score = _clean_number(score_result.get("final_score"))
-    if score is None:
-        score = _clean_number(features.get("composite_score"), 50.0)
-        if score_result.get("is_disqualified"):
-            # Mirror calculate_final_score(): disqualified stocks cap at SELL.
-            score = min(score, 30.0)
-        log.warning(
-            "final_score missing for %s - falling back to composite_score %.1f", symbol, score
-        )
+def _iso_or_none(value: datetime | None) -> str | None:
+    return value.isoformat(timespec="seconds") if value else None
+
+
+def _price_and_technical_fields(features: dict, quote: dict) -> dict:
+    """
+    The result fields that move intraday: price, change, volume, 52w
+    position and every technical indicator. Shared with the live refresh so
+    a refreshed row is built exactly like a deep-run row.
+    """
     price = _clean_number(quote.get("lastPrice"), features.get("t_price") or 0.0)
     high_52w = _clean_number(quote.get("yearHigh"), features.get("t_high_52w") or price)
     low_52w = _clean_number(quote.get("yearLow"), features.get("t_low_52w") or price)
-    news_label = features.get("s_sentiment_label") or features.get("s_label") or "NEUTRAL"
-    news_score = _clean_number(
-        features.get("sentiment_score"),
-        _clean_number(features.get("s_vader_score"), 0),
-    ) or 0
-
-    result = {
-        "symbol": symbol.replace(".NS", ""),
+    fields = {
         "price": round(price or 0, 2),
-        "score": round(score, 1),
-        "signal": score_result.get("signal") or _signal(score),
         "rsi": round(_clean_number(features.get("t_rsi_14"), 50) or 50, 1),
         "adx": round(_clean_number(features.get("t_adx"), 20) or 20, 1),
         "macd_bullish": bool(features.get("t_macd_bullish")),
@@ -493,9 +494,41 @@ def _result_from_features(symbol: str, features: dict, quote: dict, score_result
         "pct_from_52w_low": _clean_number(features.get("t_pct_from_52w_low"), 0) or 0,
         "sma_200": round(_clean_number(features.get("t_sma_200"), 0) or 0, 2),
         "sma_50": round(_clean_number(features.get("t_sma_50"), 0) or 0, 2),
+        "intraday_change": _clean_number(quote.get("pChange"), 0) or 0,
+        "live_volume": quote.get("totalTradedVolume"),
+        # NSE's clock for this price (ISO); None means it came from Yahoo history.
+        "price_as_of": _iso_or_none(parse_nse_time(quote.get("as_of"))),
+    }
+    if fields["high_52w"] and fields["price"]:
+        fields["pct_from_52w_high"] = round(((fields["high_52w"] - fields["price"]) / fields["high_52w"]) * 100, 2)
+    if fields["low_52w"] and fields["price"]:
+        fields["pct_from_52w_low"] = round(((fields["price"] - fields["low_52w"]) / fields["low_52w"]) * 100, 2)
+    return fields
+
+
+def _result_from_features(symbol: str, features: dict, quote: dict, score_result: dict) -> dict:
+    score = _clean_number(score_result.get("final_score"))
+    if score is None:
+        score = _clean_number(features.get("composite_score"), 50.0)
+        if score_result.get("is_disqualified"):
+            # Mirror calculate_final_score(): disqualified stocks cap at SELL.
+            score = min(score, 30.0)
+        log.warning(
+            "final_score missing for %s - falling back to composite_score %.1f", symbol, score
+        )
+    news_label = features.get("s_sentiment_label") or features.get("s_label") or "NEUTRAL"
+    news_score = _clean_number(
+        features.get("sentiment_score"),
+        _clean_number(features.get("s_vader_score"), 0),
+    ) or 0
+
+    return {
+        "symbol": symbol.replace(".NS", ""),
+        "score": round(score, 1),
+        "signal": score_result.get("signal") or _signal(score),
+        **_price_and_technical_fields(features, quote),
         "promoter_action": "NEUTRAL",
         "promoter_detail": "Handled by modular fundamental/institutional features",
-        "intraday_change": _clean_number(quote.get("pChange"), 0) or 0,
         "open_gap": 0,
         "news_sentiment": str(news_label).upper(),
         "news_score": news_score,
@@ -506,23 +539,16 @@ def _result_from_features(symbol: str, features: dict, quote: dict, score_result
         "analyst_rating": features.get("f_analyst_rating"),
         "company_name": quote.get("companyName") or features.get("f_company_name"),
         "industry": quote.get("industry") or features.get("f_industry") or "Unknown",
-        "live_volume": quote.get("totalTradedVolume"),
         "delivery_pct": features.get("i_delivery_pct"),
         "delivery_pct_5d": features.get("i_delivery_5d_avg"),
         "pledged_pct": features.get("f_pledged_pct"),
         "market_cap_cr": features.get("f_market_cap_cr"),
         "factor_scores": score_result.get("factor_scores"),
+        "is_disqualified": bool(score_result.get("is_disqualified")),
         "top_reasons": score_result.get("top_reasons", []),
         "regime_multiplier": score_result.get("regime_multiplier") or features.get("regime_multiplier"),
         "pipeline": "core_modular",
     }
-
-    if result["high_52w"] and result["price"]:
-        result["pct_from_52w_high"] = round(((result["high_52w"] - result["price"]) / result["high_52w"]) * 100, 2)
-    if result["low_52w"] and result["price"]:
-        result["pct_from_52w_low"] = round(((result["price"] - result["low_52w"]) / result["low_52w"]) * 100, 2)
-
-    return result
 
 
 def analyse_symbol(symbol: str, quote: dict, nifty_df: pd.DataFrame | None, regime: dict | None, market: dict, session: object, history: pd.DataFrame | None = None) -> dict | None:
@@ -800,6 +826,11 @@ def run_modular_analysis(limit: int | None = None) -> list[dict]:
             len(results), len(futures), time.monotonic() - tier2_start,
         )
         get_engine().log_summary("Fetch engine (run totals)")
+
+        # The intraday live refresh (core/live_refresh.py) re-scores these
+        # every few minutes; keeping their histories saves re-downloading.
+        global DEEP_RUN_HISTORIES
+        DEEP_RUN_HISTORIES = {sym.replace(".NS", ""): df for sym, _score, df in shortlist}
 
         results = apply_risk_to_results(results)
         publish_risk_stage_events(results)

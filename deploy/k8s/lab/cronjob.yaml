@@ -102,3 +102,47 @@ spec:
               resources:
                 requests: { cpu: 10m, memory: 16Mi }
                 limits:   { memory: 32Mi }
+---
+# Intraday live refresh: every 5 minutes, 09:00–15:55 IST, Mon–Fri. Re-scores
+# the latest deep run on live NSE data into live_snapshot (core/live_refresh.py);
+# never emails, never writes the run history. The backend answers "skipped"
+# while a deep run is in progress, so the two never overlap.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stockradar-live-refresh
+  labels: { app: stockradar-live-refresh }
+spec:
+  schedule: "*/5 9-15 * * 1-5"
+  timeZone: Asia/Kolkata
+  concurrencyPolicy: Forbid
+  # A missed tick is worthless 5 minutes later — the next one replaces it.
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels: { app: stockradar-live-refresh }
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: trigger
+              image: curlimages/curl:8.10.1
+              env:
+                - name: TOKEN
+                  valueFrom:
+                    secretKeyRef: { name: stockradar-internal, key: INTERNAL_TRIGGER_TOKEN }
+              command: ["sh", "-c"]
+              args:
+                - >-
+                  curl -fsS --max-time 30 -X POST
+                  -H "Authorization: Bearer $TOKEN"
+                  "http://stockradar-backend:8000/internal/refresh"
+              resources:
+                requests: { cpu: 10m, memory: 16Mi }
+                limits:   { memory: 32Mi }

@@ -7,7 +7,7 @@ StockRadar IN — FastAPI Backend
 • REST API consumed by the React dashboard
 """
 
-import sys, os, json, secrets, sqlite3, logging, math
+import sys, os, json, secrets, sqlite3, logging, math, threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -49,6 +49,7 @@ from Analyzer import (
     send_gmail,
 )
 from core.pipeline import get_modular_market_conditions, run_modular_analysis
+from core.live_refresh import refresh_results
 from core.lake.manager import close_lake
 from core.events.store import get_event_stats, get_recent_events
 
@@ -103,6 +104,22 @@ def init_db():
                 sector_changes   TEXT,
                 results_json     TEXT,
                 email_sent       INTEGER DEFAULT 0
+            )
+        """)
+        # One row: the latest intraday live refresh of the latest run
+        # (core/live_refresh.py). Kept apart from `runs` so run history and
+        # the forward-return labels only ever see completed deep runs.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_snapshot (
+                id               INTEGER PRIMARY KEY CHECK (id = 1),
+                run_id           INTEGER NOT NULL,
+                as_of            TEXT,
+                refreshed_at     TEXT    NOT NULL,
+                market_trend     TEXT,
+                vix_value        REAL,
+                nifty_change     REAL,
+                sector_changes   TEXT,
+                results_json     TEXT
             )
         """)
         conn.commit()
@@ -382,17 +399,28 @@ def status():
 
 @app.get("/api/latest", dependencies=[Depends(require_user)])
 def latest():
-    """Most recent analysis run with full stock results."""
+    """Most recent analysis run with full stock results.
+
+    If the intraday live refresh has re-scored this run, its rows and market
+    fields are served instead, and `live` says as of when (NSE's clock) and
+    when the refresh ran. `run.run_time` stays the deep run's time.
+    """
     with get_db() as conn:
         row = conn.execute(
             "SELECT * FROM runs ORDER BY id DESC LIMIT 1"
         ).fetchone()
+        snap = conn.execute("SELECT * FROM live_snapshot WHERE id = 1").fetchone()
     if not row:
-        return JSONResponse({"run": None, "results": []})
+        return JSONResponse({"run": None, "results": [], "live": None})
     d = dict(row)
+    live = None
+    if snap and snap["run_id"] == d["id"]:
+        for key in ("market_trend", "vix_value", "nifty_change", "sector_changes", "results_json"):
+            d[key] = snap[key]
+        live = {"as_of": snap["as_of"], "refreshed_at": snap["refreshed_at"]}
     d["results_json"]   = normalize_result_scores(json.loads(d["results_json"] or "[]"))
     d["sector_changes"] = json.loads(d["sector_changes"] or "{}")
-    payload = sanitize_floats({"run": d, "results": d["results_json"]})
+    payload = sanitize_floats({"run": d, "results": d["results_json"], "live": live})
     return JSONResponse(payload)
 
 
@@ -454,16 +482,21 @@ def trigger(request: StarletteRequest, background_tasks: BackgroundTasks, email:
 INTERNAL_TRIGGER_TOKEN = os.environ.get("INTERNAL_TRIGGER_TOKEN", "").strip()
 
 
-@app.post("/internal/run", include_in_schema=False)
-def internal_run(request: StarletteRequest, background_tasks: BackgroundTasks, email: bool = True):
+def _require_internal_token(request: StarletteRequest, action: str) -> str:
+    """404 while the token is unset, 401 on a bad one (audited); returns the caller IP."""
     if not INTERNAL_TRIGGER_TOKEN:
         raise HTTPException(status_code=404, detail="Not Found")
-
     ip = client_ip(request, TRUST_PROXY_HEADERS)
     supplied = request.headers.get("authorization", "")
     if not secrets.compare_digest(supplied.encode(), f"Bearer {INTERNAL_TRIGGER_TOKEN}".encode()):
-        audit("internal_run.rejected", identity="cronjob", ip=ip, reason="bad_token")
+        audit(f"{action}.rejected", identity="cronjob", ip=ip, reason="bad_token")
         raise HTTPException(status_code=401, detail="Unauthorized")
+    return ip
+
+
+@app.post("/internal/run", include_in_schema=False)
+def internal_run(request: StarletteRequest, background_tasks: BackgroundTasks, email: bool = True):
+    ip = _require_internal_token(request, "internal_run")
 
     # Not an error for the caller: the CronJob succeeded at its job, which was
     # to make sure a run happens. 200 keeps it from retrying into the same run.
@@ -474,6 +507,61 @@ def internal_run(request: StarletteRequest, background_tasks: BackgroundTasks, e
     audit("internal_run.accepted", identity="cronjob", ip=ip, email=email)
     background_tasks.add_task(analysis_job, send_email=email)
     return {"status": "triggered", "message": "Analysis started in background"}
+
+
+# ── Intraday live refresh (core/live_refresh.py) ───────────────────────────────
+# Every few minutes in market hours a CronJob re-scores the latest run on live
+# NSE data into `live_snapshot`, which /api/latest then serves. Never emails,
+# never writes `runs`.
+_refresh_lock = threading.Lock()
+
+
+def refresh_job():
+    if not _refresh_lock.acquire(blocking=False):
+        log.info("Live refresh already in progress — skipping")
+        return
+    try:
+        with get_db() as conn:
+            row = conn.execute("SELECT id, results_json FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+        if not row:
+            log.info("Live refresh: no run to refresh yet")
+            return
+        results, market, as_of = refresh_results(json.loads(row["results_json"] or "[]"))
+        clean_market = sanitize_floats(market)
+        with get_db() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO live_snapshot
+                   (id, run_id, as_of, refreshed_at, market_trend, vix_value, nifty_change,
+                    sector_changes, results_json)
+                   VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    row["id"], as_of, datetime.now().isoformat(timespec="seconds"),
+                    clean_market.get("market_trend"),
+                    clean_market.get("vix_value"),
+                    clean_market.get("nifty_50_change"),
+                    json.dumps(clean_market.get("sector_changes", {})),
+                    json.dumps(sanitize_floats(normalize_result_scores(results))),
+                ),
+            )
+            conn.commit()
+    except Exception as e:
+        log.exception("Live refresh failed: %s", e)
+    finally:
+        _refresh_lock.release()
+
+
+@app.post("/internal/refresh", include_in_schema=False)
+def internal_refresh(request: StarletteRequest, background_tasks: BackgroundTasks):
+    ip = _require_internal_token(request, "internal_refresh")
+    # A deep run is about to replace the results being refreshed, and both
+    # hit NSE; let it finish. The next 5-minute tick refreshes the new run.
+    if _run_is_active():
+        return {"status": "skipped", "message": "Deep analysis in progress"}
+    if _refresh_lock.locked():
+        return {"status": "already_running", "message": "Live refresh already in progress"}
+    audit("internal_refresh.accepted", identity="cronjob", ip=ip)
+    background_tasks.add_task(refresh_job)
+    return {"status": "triggered", "message": "Live refresh started in background"}
 
 
 @app.get("/api/market", dependencies=[Depends(require_user)])

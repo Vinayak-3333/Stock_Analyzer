@@ -164,6 +164,57 @@ with TestClient(api.app) as c:
     finally:
         api.analysis_job, api.INTERNAL_TRIGGER_TOKEN = real_job, real_token
 
+    # ── Intraday live refresh: /internal/refresh + /api/latest ────────────────
+    # refresh_job is stubbed; the snapshot row is written and removed here.
+    print("\n-- /internal/refresh (live refresh) --")
+    security._WINDOWS.clear()
+    real_refresh, real_active, real_token = api.refresh_job, api._run_is_active, api.INTERNAL_TRIGGER_TOKEN
+    refreshes = []
+    api.refresh_job = lambda: refreshes.append(1)
+    bearer = {"Authorization": "Bearer verify-internal-token"}
+    try:
+        api.INTERNAL_TRIGGER_TOKEN = ""
+        check("  token unset -> 404", c.post("/internal/refresh").status_code, 404)
+        api.INTERNAL_TRIGGER_TOKEN = "verify-internal-token"
+        check("  session + CSRF, no token -> 401",
+              c.post("/internal/refresh", headers={"X-CSRF-Token": CSRF}).status_code, 401)
+        api._run_is_active = lambda: True
+        r = c.post("/internal/refresh", headers=bearer)
+        check("  deep run active -> skipped", (r.status_code, r.json().get("status")), (200, "skipped"))
+        api._run_is_active = lambda: False
+        r = c.post("/internal/refresh", headers=bearer)
+        check("  right token -> triggered", (r.status_code, r.json().get("status")), (200, "triggered"))
+        check("  refresh ran once", refreshes, [1])
+        check("  not in the OpenAPI schema",
+              "/internal/refresh" in api.app.openapi().get("paths", {}), False)
+
+        with api.get_db() as conn:
+            last = conn.execute("SELECT id FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+        if last:
+            before = c.get("/api/latest").json()
+            check("  /api/latest without snapshot: live is null", before.get("live"), None)
+            with api.get_db() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO live_snapshot (id, run_id, as_of, refreshed_at, "
+                    "market_trend, vix_value, nifty_change, sector_changes, results_json) "
+                    "VALUES (1, ?, '2026-10-28T15:29:00', '2026-10-28T15:29:40', 'BULLISH', 12.5, 1.5, '{}', "
+                    "'[{\"symbol\": \"LIVETEST\", \"score\": 80, \"signal\": \"BUY\"}]')", (last["id"],))
+                conn.commit()
+            after = c.get("/api/latest").json()
+            check("  snapshot served: live.as_of", (after.get("live") or {}).get("as_of"), "2026-10-28T15:29:00")
+            check("  snapshot served: rows", [r["symbol"] for r in after.get("results", [])], ["LIVETEST"])
+            check("  snapshot served: market", after["run"].get("market_trend"), "BULLISH")
+            check("  run_time stays the deep run's", after["run"].get("run_time"), before["run"].get("run_time"))
+            with api.get_db() as conn:
+                conn.execute("UPDATE live_snapshot SET run_id = run_id - 1 WHERE id = 1")
+                conn.commit()
+            check("  snapshot of an older run ignored", c.get("/api/latest").json().get("live"), None)
+            with api.get_db() as conn:
+                conn.execute("DELETE FROM live_snapshot WHERE id = 1")
+                conn.commit()
+    finally:
+        api.refresh_job, api._run_is_active, api.INTERNAL_TRIGGER_TOKEN = real_refresh, real_active, real_token
+
     # ── Phase 4: SR-9 audit trail ─────────────────────────────────────────────
     print("\n-- SR-9: audit trail --")
     security._WINDOWS.clear()

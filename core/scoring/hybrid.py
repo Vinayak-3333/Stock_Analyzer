@@ -428,37 +428,21 @@ def risk_score(stock: dict, fund: dict) -> tuple[float, list[str]]:
 
 # ── Final Blended Score ────────────────────────────────────────────────────────
 
-def calculate_final_score(
-    fundamental: dict,
-    technical:   dict,
-    institutional: dict,
-    sentiment:   dict,
-    market:      dict,
-    stock_meta:  dict,
-    regime:      int = 1,         # 0=Bear, 1=Neutral, 2=Bull
-    ml_prob:     Optional[float] = None,  # XGBoost probability (if available)
-) -> dict:
+def combine_factor_scores(
+    factor_scores: dict,
+    regime: int = 1,
+    disqualified: bool = False,
+    ml_prob: Optional[float] = None,
+) -> tuple[float, str, float]:
     """
-    Calculate the full blended multi-factor score.
-    Returns dict with: final_score, signal, factor_scores, all_reasons, is_disqualified.
+    Weighted factor blend → (final_score, signal, regime_multiplier).
+
+    Shared by calculate_final_score() and the intraday live refresh, which
+    recomputes only the technical factor and the regime and must combine
+    them exactly the same way. Missing factors count as neutral (50).
     """
-    fund_data = {**fundamental, **stock_meta}
-
-    f_score, f_reasons = fundamental_score(fundamental)
-    t_score, t_reasons = technical_score(technical)
-    i_score, i_reasons = institutional_score(institutional)
-    s_score, s_reasons = sentiment_score(sentiment)
-    sec_score, sec_reasons = sector_score(market, stock_meta.get("industry", ""))
-    r_score, r_reasons, disqualified = risk_score(stock_meta, fundamental)
-
-    # Weighted sum
-    weighted = (
-        f_score   * WEIGHTS["fundamental"]   +
-        t_score   * WEIGHTS["technical"]     +
-        i_score   * WEIGHTS["institutional"] +
-        s_score   * WEIGHTS["sentiment"]     +
-        sec_score * WEIGHTS["sector"]        +
-        r_score   * WEIGHTS["risk"]
+    weighted = sum(
+        _safe(factor_scores.get(name), 50.0) * weight for name, weight in WEIGHTS.items()
     )
 
     # Regime multiplier
@@ -483,6 +467,40 @@ def calculate_final_score(
     elif final >= 60:  signal = "WATCH"
     elif final >= 40:  signal = "HOLD"
     else:              signal = "SELL"
+
+    return final, signal, multiplier
+
+
+def calculate_final_score(
+    fundamental: dict,
+    technical:   dict,
+    institutional: dict,
+    sentiment:   dict,
+    market:      dict,
+    stock_meta:  dict,
+    regime:      int = 1,         # 0=Bear, 1=Neutral, 2=Bull
+    ml_prob:     Optional[float] = None,  # XGBoost probability (if available)
+) -> dict:
+    """
+    Calculate the full blended multi-factor score.
+    Returns dict with: final_score, signal, factor_scores, all_reasons, is_disqualified.
+    """
+    fund_data = {**fundamental, **stock_meta}
+
+    f_score, f_reasons = fundamental_score(fundamental)
+    t_score, t_reasons = technical_score(technical)
+    i_score, i_reasons = institutional_score(institutional)
+    s_score, s_reasons = sentiment_score(sentiment)
+    sec_score, sec_reasons = sector_score(market, stock_meta.get("industry", ""))
+    r_score, r_reasons, disqualified = risk_score(stock_meta, fundamental)
+
+    final, signal, multiplier = combine_factor_scores(
+        {
+            "fundamental": f_score, "technical": t_score, "institutional": i_score,
+            "sentiment": s_score, "sector": sec_score, "risk": r_score,
+        },
+        regime=regime, disqualified=disqualified, ml_prob=ml_prob,
+    )
 
     all_reasons = f_reasons + t_reasons + i_reasons + s_reasons + sec_reasons + r_reasons
     # Keep top 5 reasons by absolute impact
