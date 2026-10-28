@@ -92,8 +92,17 @@ user needs, while the micro can be free after the planned move to a US region
 before the trial ends (~2027-01-23). Revisit if `DEEP_ANALYSIS_COUNT` or the
 universe grows, or if the analysis moves to the k8s cluster.
 
+### Shipped
+- **"Email sent" now reflects the real outcome** (the 2026-10-27 finding).
+  `send_gmail` returns `True` only when Gmail accepts the message, logs
+  failures through `logging` instead of `print` (which the container
+  buffered), and skips the attempt with a warning when the credentials are
+  missing — the lab pod's case. `analysis_job` stores that result, so the
+  `runs.email_sent` column was also wrong before: it was `True` for every run
+  that tried to email. Tested with mocked SMTP: no credentials, auth failure
+  and network error give `False`; success gives `True`.
+
 ### Open
-- "Email sent" is still logged unconditionally (see 2026-10-27).
 - Quiet the `sort_index` / `TzCache` log noise.
 - Region move + billing upgrade before 2027-01-23.
 

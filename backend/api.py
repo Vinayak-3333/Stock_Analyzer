@@ -202,9 +202,7 @@ def analysis_job(send_email: bool = True):
             ts      = datetime.now().strftime("%d %b %Y %H:%M IST")
             subject = build_subject(results)
             body    = build_email_body(results, ts)
-            send_gmail(subject, body)
-            emailed = True
-            log.info("Email sent")
+            emailed = send_gmail(subject, body)
 
         save_run(market, results, emailed)
         log.info("=== Analysis job done — %d stocks ===", len(results))

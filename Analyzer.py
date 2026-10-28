@@ -15,6 +15,7 @@ Credentials come from the environment / project-root `.env`; never hardcode them
 Gmail App Password: myaccount.google.com -> Security -> App Passwords.
 """
 
+import logging
 import os
 import smtplib
 from datetime import datetime
@@ -28,7 +29,9 @@ try:
 except Exception:
     pass
 
-GMAIL_SENDER        = os.environ.get("GMAIL_SENDER", "")
+log = logging.getLogger(__name__)
+
+GMAIL_SENDER       = os.environ.get("GMAIL_SENDER", "")
 GMAIL_APP_PASSWORD  = os.environ.get("GMAIL_APP_PASSWORD", "")   # 16-char Gmail App Password
 RECIPIENT_EMAIL     = os.environ.get("RECIPIENT_EMAIL", GMAIL_SENDER)
 EMAIL_SUBJECT_PREFIX = "[StockRadar IN]"
@@ -204,8 +207,16 @@ def build_subject(results):
 # GMAIL SENDER
 # ─────────────────────────────────────────────
 
-def send_gmail(subject, body):
-    """Sends a plain-text email via Gmail SMTP with App Password."""
+def send_gmail(subject, body) -> bool:
+    """Sends a plain-text email via Gmail SMTP with App Password.
+
+    Returns True only if Gmail accepted the message. Failures are logged, not
+    raised, so a mail problem never fails the analysis run that triggered it.
+    """
+    if not GMAIL_SENDER or not GMAIL_APP_PASSWORD:
+        log.warning("Email not sent — GMAIL_SENDER / GMAIL_APP_PASSWORD not set")
+        return False
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = GMAIL_SENDER
@@ -216,8 +227,11 @@ def send_gmail(subject, body):
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(GMAIL_SENDER, GMAIL_APP_PASSWORD.replace(" ", ""))
             server.sendmail(GMAIL_SENDER, RECIPIENT_EMAIL, msg.as_string())
-        print(f"[Email] Sent to {RECIPIENT_EMAIL} ✓")
     except smtplib.SMTPAuthenticationError:
-        print("[Email] Auth failed — check Gmail App Password.")
+        log.error("Email not sent — Gmail auth failed, check the App Password")
+        return False
     except Exception as e:
-        print(f"[Email] Failed: {e}")
+        log.error("Email not sent — %s: %s", type(e).__name__, e)
+        return False
+    log.info("Email sent to %s", RECIPIENT_EMAIL)
+    return True
