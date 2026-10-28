@@ -54,38 +54,53 @@ path is reachable inside the cluster and nowhere else — step 2 relies on this.
 | 2026-10-27 | Full analysis on the lab: 7m40s, peak 325 Mi | DN-28 |
 | 2026-10-28 | `SCHEDULER_ENABLED` flag replaces the lab's APScheduler monkeypatch | `672b285` |
 | 2026-10-28 | CI builds `alt-approach` as `:<sha>` only; `:latest` stays `master`-only. Lab pinned to a SHA | `672b285`, `23a37a0` |
+| 2026-10-28 | **Step 1:** `/internal/run` + two CronJobs start the lab's scheduled runs | `7f424e6`, `a8d44ce` |
 
 ## Next steps
 
-### 1. Scheduler out of the API process → CronJob
+### 1. Scheduler out of the API process → CronJob — **done 2026-10-28**
 
 Goal: the API pods serve requests only; a Kubernetes CronJob decides when the
 analysis runs. That is the precondition for ever running more than one API
 replica, and on the lab it replaces "no schedule at all" with a schedule that
 is visible in `kubectl get cronjobs`.
 
-Design:
-- **Internal trigger route** on the backend, e.g. `POST /internal/run`,
-  authorised by a shared token (`INTERNAL_TRIGGER_TOKEN`, from a Secret),
-  compared in constant time. Not under `/api/`, so nginx never forwards it —
-  unreachable from outside on both the lab and the live VM. Disabled entirely
-  when the token is unset (the default), so the live VM gains no new surface.
-  It calls the same `analysis_job`, with its own audit-log entry.
+As built (`7f424e6`, lab pinned in `a8d44ce`):
+- **`POST /internal/run`** (`backend/api.py`), authorised by
+  `Authorization: Bearer $INTERNAL_TRIGGER_TOKEN`, compared in constant time
+  and audited (`internal_run.accepted` / `.rejected`). Not under `/api/`, so
+  nginx never forwards it. **With the token unset — the default, and the live
+  VM — it answers 404**, so the live VM gains no new surface. Takes
+  `email=true|false` and calls the same `analysis_job`. Answers 200
+  `already_running` rather than an error if a run is in flight, so the Job
+  doesn't retry into it.
 - Why not reuse `/api/trigger`: it needs a browser session and a CSRF token by
   design (SR-1), and it is rate-limited for humans.
 - Why not run the analysis in the CronJob pod itself: the backend holds the
   DuckDB lake open as its only writer, so a second process can't write it.
-  That changes only with step 4.
-- **CronJob** `stockradar-analysis`: `09:15` and `15:30` `Asia/Kolkata`
-  (`timeZone:` field), Mon–Fri, `concurrencyPolicy: Forbid`,
-  `startingDeadlineSeconds` ~4h (matching today's misfire grace), a tiny
-  `curl` image posting to `http://stockradar-backend:8000/internal/run`.
-- **Lab email stays off**: the internal route must honour an `email=false`
-  parameter, and the lab still has no Gmail secret as a backstop.
+  That changes only with step 4. The Job just POSTs and exits; the run happens
+  in the backend pod.
+- **Two CronJobs** in `deploy/k8s/lab/cronjob.yaml`,
+  `stockradar-analysis-0915` and `-1530` (one cron expression can't say both
+  times): `timeZone: Asia/Kolkata`, Mon–Fri, `concurrencyPolicy: Forbid`,
+  `curlimages/curl:8.10.1`, `email=false`.
+- **`startingDeadlineSeconds: 600`, not the live VM's 4 h grace.** The lab is
+  stopped most of the time; starting it at noon must not fire a stale 09:15
+  run.
+- **Token in its own Secret** `stockradar-internal`, shared by the backend and
+  the CronJobs, so the curl pod never sees the OIDC/session secrets. Created
+  by hand on the cluster (command in `cronjob.yaml`), never committed.
 
-Checks before calling it done: the route returns 404 through the public URL;
-401 without the token inside the cluster; a manual
-`kubectl create job --from=cronjob/stockradar-analysis` produces a saved run.
+Verified on the lab:
+
+| Check | Result |
+|---|---|
+| `_verify_security.py` (10 new checks: 404 unset, 401 no/wrong/unprefixed token and with a valid session + CSRF, 200 with token, `email=False` passed through, absent from OpenAPI, audited) | **50/50** |
+| `POST /internal/run` through the public URL | nginx `405`, HTML — never reaches the backend |
+| Same, inside the cluster, no token | backend `401` |
+| `kubectl create job --from=cronjob/stockradar-analysis-0915` | Job complete; `internal_run.accepted … email=False`; run 3 saved, `email_sent=0`, 8m15s, universe 1,806, Tier 2 400/400 |
+
+### 2. Shared run lock
 
 ### 2. Shared run lock
 

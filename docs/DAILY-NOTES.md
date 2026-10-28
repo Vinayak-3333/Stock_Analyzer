@@ -131,6 +131,19 @@ universe grows, or if the analysis moves to the k8s cluster.
   The 894 MB backend image took **5 min** to pull on the lab VM — the
   rollout's default timeouts are too short for a fresh SHA; allow ~6 min.
 
+- **Kubernetes plan written down** — [`docs/k8s/PLAN.md`](k8s/PLAN.md)
+  (`ee7e00e`). The cluster is a **learning lab** for now; production is
+  revisited before 2027-01-23.
+- **Plan step 1 done: CronJobs start the lab's scheduled runs** (`7f424e6`,
+  lab pinned in `a8d44ce`). New `POST /internal/run`, bearer token
+  `INTERNAL_TRIGGER_TOKEN`, outside `/api/` so nginx never forwards it, and
+  **404 while the token is unset — the live VM's case**. Two CronJobs
+  (09:15, 15:30 IST) POST to it with `email=false`; the token is in its own
+  Secret `stockradar-internal`. `_verify_security.py` 50/50 (10 new).
+  On the lab: public URL → nginx 405, in-cluster without token → 401, a Job
+  from the 09:15 CronJob → accepted, run 3 saved with `email_sent=0` in 8m15s (universe 1,806, Tier 2 400/400). The lab's run 2 from 27 Oct reads `email_sent=1` with no Gmail credentials — the bug fixed in `da1f469`, caught in the data. Design and the reasons
+  behind each choice are in the plan.
+
 ### Found
 - Git Bash `curl` on this laptop returns `000` (exit 23/43) whenever `-o` or
   `-w` is used, although the request succeeds. Probe with `curl -sI` instead.
@@ -139,8 +152,8 @@ universe grows, or if the analysis moves to the k8s cluster.
 - Region move + billing upgrade before 2027-01-23.
 - Kubernetes plan now written down: [`docs/k8s/PLAN.md`](k8s/PLAN.md). The
   cluster is a **learning lab** for now (production revisited before
-  2027-01-23). Next: CronJob via an internal trigger route, then a shared run
-  lock, then lab hardening.
+  2027-01-23). Step 1 (CronJob) done; next: a shared run lock, then lab
+  hardening.
 - Lab VM `stockradar-k8s` left **running** (~₹80/day).
 
 ---
