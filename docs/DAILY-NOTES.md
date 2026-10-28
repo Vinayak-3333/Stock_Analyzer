@@ -137,9 +137,10 @@ universe grows, or if the analysis moves to the k8s cluster.
 
 ### Open
 - Region move + billing upgrade before 2027-01-23.
-- Phase 0 of the Kubernetes plan: scheduler → CronJob (the flag is the first
-  half), shared run lock, shared tables → Postgres. The plan itself is not
-  written down anywhere yet — only in these notes.
+- Kubernetes plan now written down: [`docs/k8s/PLAN.md`](k8s/PLAN.md). The
+  cluster is a **learning lab** for now (production revisited before
+  2027-01-23). Next: CronJob via an internal trigger route, then a shared run
+  lock, then lab hardening.
 - Lab VM `stockradar-k8s` left **running** (~₹80/day).
 
 ---
