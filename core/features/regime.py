@@ -7,7 +7,9 @@ rule-based logic on NIFTY 50 trend, India VIX, and breadth signals.
 Also computes macro features: crude oil, USD/INR, US market trend,
 US 10Y yield, and sector breadth.
 
-All data is sourced from **yfinance** — no API keys required.
+Daily history comes from **yfinance** (cached 1h); today's NIFTY / India
+VIX bar and the sector moves come live from NSE `allIndices` (refreshed at
+most every 60s). No API keys required.
 
 Usage
 -----
@@ -26,22 +28,27 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
+from core.features.live_bar import parse_nse_time, quote_from_index_row, with_live_bar
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Module-level cache (key → (timestamp, payload))
 # ---------------------------------------------------------------------------
 _cache: Dict[str, tuple[float, Any]] = {}
+# Yahoo daily downloads: the 200-SMA and 1-month moves barely change in an
+# hour. The live NSE layer on top is refreshed far more often.
 _CACHE_TTL_SECONDS: int = 3600  # 1 hour
+_LIVE_TTL_SECONDS: int = 60
 
 
-def _get_cached(key: str) -> Optional[Any]:
+def _get_cached(key: str, ttl: int = _CACHE_TTL_SECONDS) -> Optional[Any]:
     """Return cached value if still fresh, else *None*."""
     entry = _cache.get(key)
     if entry is None:
         return None
     ts, payload = entry
-    if time.time() - ts > _CACHE_TTL_SECONDS:
+    if time.time() - ts > ttl:
         _cache.pop(key, None)
         return None
     return payload
@@ -151,6 +158,32 @@ _SECTOR_MAP: Dict[str, str] = {
     "Metal": "^CNXMETAL",
 }
 
+# The same sectors under their NSE `allIndices` names.
+_NSE_SECTOR_MAP: Dict[str, str] = {
+    "IT": "NIFTY IT",
+    "Pharma": "NIFTY PHARMA",
+    "Banking": "NIFTY BANK",
+    "Auto": "NIFTY AUTO",
+    "FMCG": "NIFTY FMCG",
+    "Metal": "NIFTY METAL",
+}
+
+
+def _fetch_live_indices() -> Dict[str, dict]:
+    """NSE `allIndices`, or {} — the regime then falls back to Yahoo alone."""
+    try:
+        from core.collectors.nse import fetch_live_indices  # lazy: heavy module
+        return fetch_live_indices()
+    except Exception:
+        logger.warning("NSE live indices unavailable — regime uses Yahoo daily bars only", exc_info=True)
+        return {}
+
+
+def _live_sector_breadth(live: Dict[str, dict]) -> Optional[Dict[str, Optional[float]]]:
+    """Live 1-day % change per sector from NSE, or None if NSE gave none."""
+    out = {name: live.get(nse, {}).get("percentChange") for name, nse in _NSE_SECTOR_MAP.items()}
+    return out if any(v is not None for v in out.values()) else None
+
 
 # ---------------------------------------------------------------------------
 # Core public API
@@ -184,20 +217,34 @@ def compute_regime_features() -> Dict[str, Any]:
     ============================  ========================================
     """
     # --- Check cache first ---
-    cached = _get_cached("regime_features")
+    cached = _get_cached("regime_features", _LIVE_TTL_SECONDS)
     if cached is not None:
         logger.debug("Returning cached regime features")
         return cached
 
     logger.info("Computing regime features …")
 
-    # --- Download all tickers in parallel-safe, individual calls ----------
-    nifty_df = _safe_download("^NSEI", period="1y")
-    vix_df = _safe_download("^INDIAVIX", period="3mo")
-    crude_df = _safe_download("CL=F", period="3mo")
-    usdinr_df = _safe_download("USDINR=X", period="3mo")
-    sp500_df = _safe_download("^GSPC", period="3mo")
-    tnx_df = _safe_download("^TNX", period="1mo")
+    # --- Daily history from Yahoo (cached 1h) ------------------------------
+    daily = _get_cached("regime_daily")
+    if daily is None:
+        daily = {
+            "nifty": _safe_download("^NSEI", period="1y"),
+            "vix": _safe_download("^INDIAVIX", period="3mo"),
+            "crude": _safe_download("CL=F", period="3mo"),
+            "usdinr": _safe_download("USDINR=X", period="3mo"),
+            "sp500": _safe_download("^GSPC", period="3mo"),
+            "tnx": _safe_download("^TNX", period="1mo"),
+        }
+        _set_cache("regime_daily", daily)
+    crude_df, usdinr_df, sp500_df, tnx_df = daily["crude"], daily["usdinr"], daily["sp500"], daily["tnx"]
+
+    # --- Live NSE layer: today's NIFTY / VIX bar and sector moves ----------
+    # Splicing today's bar onto the daily history keeps every window's
+    # meaning (5d is still 5 sessions) while the last bar is "now".
+    live = _fetch_live_indices()
+    nifty_df = with_live_bar(daily["nifty"], quote_from_index_row(live.get("NIFTY 50")))
+    vix_df = with_live_bar(daily["vix"], quote_from_index_row(live.get("INDIA VIX")))
+    live_as_of = parse_nse_time((live.get("NIFTY 50") or {}).get("as_of"))
 
     # --- NIFTY 50 ----------------------------------------------------------
     nifty_1d = _pct_change_n(nifty_df, 1)
@@ -219,7 +266,11 @@ def compute_regime_features() -> Dict[str, Any]:
         vix_regime = "HIGH"
 
     # --- Breadth estimate (% of NIFTY 50 constituents > 200-SMA) -----------
-    breadth_pct = _estimate_nifty50_breadth()
+    # 20 Yahoo downloads; a 200-day average moves slowly, so cached 1h.
+    breadth_pct = _get_cached("breadth_pct")
+    if breadth_pct is None:
+        breadth_pct = _estimate_nifty50_breadth()
+        _set_cache("breadth_pct", breadth_pct)
 
     # --- Crude oil ---------------------------------------------------------
     crude_1m = _pct_change_n(crude_df, 22)  # ~1 trading month
@@ -265,7 +316,10 @@ def compute_regime_features() -> Dict[str, Any]:
     us_10y = _latest_close(tnx_df)
 
     # --- Sector breadth (1-day % change) -----------------------------------
-    sector_breadth = _compute_sector_breadth()
+    sector_breadth = _live_sector_breadth(live) or _get_cached("sector_breadth")
+    if sector_breadth is None:
+        sector_breadth = _compute_sector_breadth()
+        _set_cache("sector_breadth", sector_breadth)
 
     # --- Regime classification (rule-based) --------------------------------
     market_regime, regime_score = _classify_regime(
@@ -293,6 +347,9 @@ def compute_regime_features() -> Dict[str, Any]:
         "us_10y_yield": us_10y,
         "sector_breadth": sector_breadth,
         "computed_at": datetime.now().isoformat(timespec="seconds"),
+        # NSE's own clock for the live layer; None means NSE was unreachable
+        # and every value above is from Yahoo's daily bars.
+        "as_of": live_as_of.isoformat(timespec="seconds") if live_as_of else None,
     }
 
     _set_cache("regime_features", features)

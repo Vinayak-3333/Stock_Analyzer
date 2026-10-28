@@ -231,7 +231,12 @@ def fetch_index_quotes(session: requests.Session, index_name: str) -> list[dict]
     data = _nse_get(session, "equity-stock-indices", {"index": index_name})
     if not data:
         return []
-    return data.get("data", [])
+    rows = data.get("data", [])
+    # Rows carry their own lastUpdateTime; the response timestamp covers any
+    # that don't. Either way it's NSE's clock, not ours.
+    for r in rows:
+        r.setdefault("lastUpdateTime", data.get("timestamp"))
+    return rows
 
 
 def collect_all_quotes(session: requests.Session = None) -> dict:
@@ -269,6 +274,7 @@ def collect_all_quotes(session: requests.Session = None) -> dict:
                 "industry":    (s.get("meta") or {}).get("industry", ""),
                 "isin":        (s.get("meta") or {}).get("isin", ""),
                 "index":       index_name,
+                "as_of":       s.get("lastUpdateTime"),
                 "fetched_at":  datetime.now().isoformat(),
             }
             all_quotes[sym] = quote
@@ -291,12 +297,14 @@ def fetch_traded_quotes(session: requests.Session = None) -> dict:
     lakhs and is converted to shares to match the index feed.
 
     Returns {symbol: {lastPrice, previousClose, pChange, totalTradedVolume,
-    index, fetched_at}}; {} if the call fails.
+    index, as_of, fetched_at}}; {} if the call fails.
     """
     if session is None:
         session = _make_session()
     data = _nse_get(session, "live-analysis-stocksTraded")
-    rows = ((data or {}).get("total") or {}).get("data") or []
+    total = (data or {}).get("total") or {}
+    rows = total.get("data") or []
+    as_of = total.get("timestamp") or (data or {}).get("timestamp")
 
     quotes = {}
     for r in rows:
@@ -313,10 +321,30 @@ def fetch_traded_quotes(session: requests.Session = None) -> dict:
             "pChange":           r.get("pchange"),
             "totalTradedVolume": round(volume_lakhs * 100_000) if volume_lakhs is not None else None,
             "index":             "NSE_TRADED",
+            "as_of":             as_of,
             "fetched_at":        datetime.now().isoformat(),
         }
-    log.info("Collected %d traded-stock quotes", len(quotes))
+    log.info("Collected %d traded-stock quotes (as of %s)", len(quotes), as_of)
     return quotes
+
+
+def fetch_live_indices(session: requests.Session = None) -> dict:
+    """
+    Every NSE index, live, in one call (`allIndices`): last, open/high/low,
+    percentChange, previousClose, the values 1 week / 1 month / 1 year ago,
+    and advances/declines. Rows are returned as NSE sends them, keyed by
+    index name, each stamped with the response's `as_of`. {} on failure.
+    """
+    if session is None:
+        session = _make_session()
+    data = _nse_get(session, "allIndices") or {}
+    as_of = data.get("timestamp")
+    out = {}
+    for row in data.get("data") or []:
+        name = row.get("index")
+        if name:
+            out[name] = {**row, "as_of": as_of}
+    return out
 
 
 # ── 2. Delivery Data ──────────────────────────────────────────────────────────

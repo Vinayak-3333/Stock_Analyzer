@@ -45,9 +45,11 @@ from core.collectors.nse import (
     collect_all_quotes,
     fetch_cached_symbols_from_lake,
     fetch_equity_symbols_from_bhavcopy,
+    fetch_live_indices,
     fetch_traded_quotes,
     save_known_symbols_to_lake,
 )
+from core.features.live_bar import quote_from_index_row, with_live_bar
 from core.features.regime import compute_regime_features
 from core.features.store import compute_all_features
 from core.fetch import get_engine
@@ -200,6 +202,7 @@ def _screen_universe(
     symbols: list[str],
     nifty_df: pd.DataFrame | None,
     prefetched: dict[str, pd.DataFrame] | None = None,
+    quotes: dict[str, dict] | None = None,
 ) -> list[tuple[str, float, pd.DataFrame]]:
     """
     Tier 1: technical-only screen over the whole universe — no per-symbol
@@ -220,6 +223,16 @@ def _screen_universe(
         "Tier-1 histories: %d/%d symbols (%d reused from symbol resolution)",
         len(histories), len(symbols), len(symbols) - len(missing),
     )
+    # Today's live NSE bar replaces Yahoo's missing or ~15-min-delayed one,
+    # here once, so Tier 1 and the Tier-2 features both end at "now".
+    quotes = quotes or {}
+    live_count = 0
+    for sym, df in list(histories.items()):
+        spliced = with_live_bar(df, quotes.get(sym))
+        if spliced is not df:
+            histories[sym] = spliced
+            live_count += 1
+    log.info("Live bar spliced into %d/%d histories", live_count, len(histories))
     screened: list[tuple[str, float, pd.DataFrame]] = []
     for sym, df in histories.items():
         try:
@@ -294,6 +307,10 @@ def _yahoo_quotes_and_histories(
 
 
 def _store_ohlcv(symbol: str, df: pd.DataFrame) -> None:
+    # A live bar is an unfinished session; raw_ohlcv feeds the forward-return
+    # labels (core/backtest/labels.py), so only completed days are stored.
+    if df.attrs.get("live_bar"):
+        df = df.iloc[:-1]
     try:
         lake = get_lake()
         out = df.reset_index().copy()
@@ -721,10 +738,14 @@ def run_modular_analysis(limit: int | None = None) -> list[dict]:
 
         regime = compute_regime_features()
         market = _market_payload(regime)
-        nifty_df = _download_history("^NSEI")
+        # Relative strength compares each stock with NIFTY, so both end today.
+        nifty_df = with_live_bar(
+            _download_history("^NSEI"),
+            quote_from_index_row(fetch_live_indices(session).get("NIFTY 50")),
+        )
 
         # ── Tier 1: cheap technical screen over the full universe ──────────────
-        screened = _screen_universe(symbols, nifty_df, prefetched=histories)
+        screened = _screen_universe(symbols, nifty_df, prefetched=histories, quotes=quotes)
         del histories  # screened now holds the ones still needed
         screened_count = len(screened)
         deep_count = limit if limit else DEEP_ANALYSIS_COUNT
