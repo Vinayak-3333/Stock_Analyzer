@@ -15,8 +15,9 @@ spec:
     spec:
       containers:
         - name: frontend
+          # Tag pinned to a commit SHA in kustomization.yaml (`images:`).
           image: ghcr.io/vinayak-3333/stock-analyzer-frontend:latest
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80
           resources:

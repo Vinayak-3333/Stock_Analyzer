@@ -20,8 +20,9 @@ metadata:
   labels: { app: stockradar-backend }
 spec:
   # ONE replica, and Recreate rather than RollingUpdate: DuckDB allows a
-  # single writer, and APScheduler would double-fire with two copies. Both
-  # are Phase 0 work in the Kubernetes plan; until then this cannot scale.
+  # single writer. SCHEDULER_ENABLED=false stops the double-firing, but the
+  # lake and the in-process run guard still need Phase 0 (Postgres, a shared
+  # run lock) before this can scale.
   replicas: 1
   strategy:
     type: Recreate
@@ -33,27 +34,18 @@ spec:
     spec:
       containers:
         - name: backend
+          # Tag pinned to a commit SHA in kustomization.yaml (`images:`).
           image: ghcr.io/vinayak-3333/stock-analyzer-backend:latest
-          imagePullPolicy: Always
-          workingDir: /app/backend
-          # The image's CMD with one change: add_job is made a no-op before
-          # api.py is imported, so the scheduler starts with no jobs. The
-          # startup log shows "jobs: []". Lab-only — the real fix is a
-          # SCHEDULER_ENABLED flag or a CronJob (plan Phase 0).
-          command:
-            - python
-            - -c
-            - |
-              import apscheduler.schedulers.base as b
-              b.BaseScheduler.add_job = lambda self, *a, **k: None
-              import uvicorn
-              uvicorn.run("api:app", host="0.0.0.0", port=8000, workers=1, access_log=False)
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
           envFrom:
             - secretRef:
                 name: stockradar-secrets
           env:
+            # No 09:15/15:30 jobs: only the live VM runs and emails the
+            # analysis. The startup log says "Scheduler started with no jobs".
+            - { name: SCHEDULER_ENABLED, value: "false" }
             - { name: APP_DOMAIN, value: stockradar-k8s.tail7679a0.ts.net }
             - { name: OIDC_REDIRECT_URI, value: "https://$(APP_DOMAIN)/auth/callback" }
             - { name: FRONTEND_URL, value: "https://$(APP_DOMAIN)" }

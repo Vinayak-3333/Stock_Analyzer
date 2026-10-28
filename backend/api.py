@@ -217,15 +217,22 @@ def analysis_job(send_email: bool = True):
 IST = pytz.timezone("Asia/Kolkata")
 scheduler = BackgroundScheduler(timezone=IST)
 
+# Off for any copy of the backend that must not run or email the analysis on
+# its own (the k8s lab today; later, API replicas behind a CronJob). Manual
+# runs from the dashboard still work. The scheduler itself still starts, just
+# with no jobs, so /api/status keeps its shape.
+SCHEDULER_ENABLED = os.environ.get("SCHEDULER_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+
 # 09:15 IST and 15:30 IST, Mon–Fri.  coalesce + misfire_grace_time let a
 # delayed job still fire once instead of being dropped silently.  Grace is
 # 4h because this backend runs on a laptop that sleeps: waking at 11:00
 # should still produce the morning run (live market data is still useful),
 # not silently skip to 15:30.
-scheduler.add_job(analysis_job, CronTrigger(day_of_week="mon-fri", hour=9,  minute=15, timezone=IST),
-                  coalesce=True, misfire_grace_time=14400, max_instances=1)
-scheduler.add_job(analysis_job, CronTrigger(day_of_week="mon-fri", hour=15, minute=30, timezone=IST),
-                  coalesce=True, misfire_grace_time=14400, max_instances=1)
+if SCHEDULER_ENABLED:
+    scheduler.add_job(analysis_job, CronTrigger(day_of_week="mon-fri", hour=9,  minute=15, timezone=IST),
+                      coalesce=True, misfire_grace_time=14400, max_instances=1)
+    scheduler.add_job(analysis_job, CronTrigger(day_of_week="mon-fri", hour=15, minute=30, timezone=IST),
+                      coalesce=True, misfire_grace_time=14400, max_instances=1)
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
 # docs_url/redoc_url/openapi_url are disabled here and re-served by
@@ -296,7 +303,10 @@ log.info("Security posture: %s", security_summary())
 def on_startup():
     init_db()
     scheduler.start()
-    log.info("Scheduler started — jobs: %s", [str(j) for j in scheduler.get_jobs()])
+    if SCHEDULER_ENABLED:
+        log.info("Scheduler started — jobs: %s", [str(j) for j in scheduler.get_jobs()])
+    else:
+        log.warning("Scheduler started with no jobs — SCHEDULER_ENABLED=false, only manual runs")
 
 
 @app.on_event("startup")

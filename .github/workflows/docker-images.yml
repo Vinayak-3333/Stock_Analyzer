@@ -1,9 +1,17 @@
 name: Build Docker Images
 
+# master publishes :latest (what the live VM pulls) plus :<sha>.
+# alt-approach publishes :<sha> only, so the k8s lab can pin a branch build
+# without anything reaching the live VM.
 on:
   push:
     branches:
       - master
+      - alt-approach
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "deploy/k8s/**"
   workflow_dispatch:
 
 permissions:
@@ -34,6 +42,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # :latest only from master; an empty line in `tags` is skipped.
       - name: Build and push backend image
         uses: docker/build-push-action@v6
         with:
@@ -41,7 +50,7 @@ jobs:
           file: Dockerfile.backend
           push: true
           tags: |
-            ${{ env.BACKEND_IMAGE }}:latest
+            ${{ github.ref == 'refs/heads/master' && format('{0}:latest', env.BACKEND_IMAGE) || '' }}
             ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
 
       - name: Build and push frontend image
@@ -53,5 +62,5 @@ jobs:
           build-args: |
             VITE_API_URL=/api
           tags: |
-            ${{ env.FRONTEND_IMAGE }}:latest
+            ${{ github.ref == 'refs/heads/master' && format('{0}:latest', env.FRONTEND_IMAGE) || '' }}
             ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}

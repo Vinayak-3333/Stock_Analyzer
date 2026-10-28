@@ -5,8 +5,8 @@
 # A learning cluster that runs ALONGSIDE the live `stockradar` VM, never
 # instead of it. Two rules keep it from interfering:
 #
-#   * No scheduler. The backend starts with the 09:15/15:30 jobs stripped
-#     (see backend.yaml), so only the live VM runs and emails the analysis.
+#   * No scheduler. SCHEDULER_ENABLED=false (see backend.yaml), so only the
+#     live VM runs and emails the analysis.
 #   * No Gmail credentials. The secret below has none, so even a manual run
 #     triggered from the lab dashboard cannot send mail.
 #
