@@ -1,0 +1,104 @@
+# ── Scheduled analysis: CronJobs instead of the in-process scheduler ─────────
+#
+# The backend runs with SCHEDULER_ENABLED=false; these decide when a run
+# happens and POST to the backend's /internal/run (docs/k8s/PLAN.md step 1).
+# The run itself still executes inside the backend pod, because it holds the
+# DuckDB lake as the only writer — the Job just starts it and exits.
+#
+# Two CronJobs because 09:15 and 15:30 differ in both hour and minute, which
+# one cron expression can't say.
+#
+# The token lives in its own Secret, created by hand and shared with the
+# backend, so this pod never sees the OIDC/session secrets:
+#
+#   kubectl -n stockradar create secret generic stockradar-internal \
+#     --from-literal=INTERNAL_TRIGGER_TOKEN="$(openssl rand -hex 32)"
+#
+# Run one now:   kubectl -n stockradar create job --from=cronjob/stockradar-analysis-0915 manual-$(date +%s)
+# Pause both:    kubectl -n stockradar patch cronjob <name> -p '{"spec":{"suspend":true}}'
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stockradar-analysis-0915
+  labels: { app: stockradar-analysis }
+spec:
+  schedule: "15 9 * * 1-5"
+  timeZone: Asia/Kolkata
+  # Never two at once. The backend's own guard is the second line of defence.
+  concurrencyPolicy: Forbid
+  # The live VM allows a 4h misfire grace for a sleeping laptop. The lab is
+  # stopped most of the time, so starting it at noon must NOT fire a stale
+  # 09:15 run: 10 minutes, then skip.
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2              # backend restarting / not ready yet
+      activeDeadlineSeconds: 300   # the POST returns at once; the run is in the backend
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: stockradar-analysis }
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: trigger
+              image: curlimages/curl:8.10.1
+              env:
+                - name: TOKEN
+                  valueFrom:
+                    secretKeyRef: { name: stockradar-internal, key: INTERNAL_TRIGGER_TOKEN }
+              # email=false: the lab never emails (it has no Gmail secret
+              # either). -f turns a 401/5xx into a failed Job.
+              command: ["sh", "-c"]
+              args:
+                - >-
+                  curl -fsS --max-time 30 -X POST
+                  -H "Authorization: Bearer $TOKEN"
+                  "http://stockradar-backend:8000/internal/run?email=false"
+              resources:
+                requests: { cpu: 10m, memory: 16Mi }
+                limits:   { memory: 32Mi }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stockradar-analysis-1530
+  labels: { app: stockradar-analysis }
+spec:
+  schedule: "30 15 * * 1-5"
+  timeZone: Asia/Kolkata
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2              # backend restarting / not ready yet
+      activeDeadlineSeconds: 300   # the POST returns at once; the run is in the backend
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: stockradar-analysis }
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: trigger
+              image: curlimages/curl:8.10.1
+              env:
+                - name: TOKEN
+                  valueFrom:
+                    secretKeyRef: { name: stockradar-internal, key: INTERNAL_TRIGGER_TOKEN }
+              # email=false: the lab never emails (it has no Gmail secret
+              # either). -f turns a 401/5xx into a failed Job.
+              command: ["sh", "-c"]
+              args:
+                - >-
+                  curl -fsS --max-time 30 -X POST
+                  -H "Authorization: Bearer $TOKEN"
+                  "http://stockradar-backend:8000/internal/run?email=false"
+              resources:
+                requests: { cpu: 10m, memory: 16Mi }
+                limits:   { memory: 32Mi }

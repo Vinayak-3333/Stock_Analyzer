@@ -5,8 +5,8 @@
 # A learning cluster that runs ALONGSIDE the live `stockradar` VM, never
 # instead of it. Two rules keep it from interfering:
 #
-#   * No scheduler. SCHEDULER_ENABLED=false (see backend.yaml), so only the
-#     live VM runs and emails the analysis.
+#   * No in-process scheduler (SCHEDULER_ENABLED=false). The CronJobs in
+#     cronjob.yaml start the 09:15/15:30 runs with email=false.
 #   * No Gmail credentials. The secret below has none, so even a manual run
 #     triggered from the lab dashboard cannot send mail.
 #
@@ -29,6 +29,7 @@ resources:
   - backend.yaml
   - frontend.yaml
   - ingress.yaml
+  - cronjob.yaml
 
 # The build the lab runs. CI publishes :<sha> for every master and
 # alt-approach push. To move the lab:

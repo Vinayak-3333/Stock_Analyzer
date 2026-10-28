@@ -43,9 +43,14 @@ spec:
             - secretRef:
                 name: stockradar-secrets
           env:
-            # No 09:15/15:30 jobs: only the live VM runs and emails the
-            # analysis. The startup log says "Scheduler started with no jobs".
+            # No in-process 09:15/15:30 jobs: the CronJobs in cronjob.yaml
+            # start runs instead, with email off. The startup log says
+            # "Scheduler started with no jobs".
             - { name: SCHEDULER_ENABLED, value: "false" }
+            # Shared with the CronJobs in cronjob.yaml; enables /internal/run.
+            - name: INTERNAL_TRIGGER_TOKEN
+              valueFrom:
+                secretKeyRef: { name: stockradar-internal, key: INTERNAL_TRIGGER_TOKEN }
             - { name: APP_DOMAIN, value: stockradar-k8s.tail7679a0.ts.net }
             - { name: OIDC_REDIRECT_URI, value: "https://$(APP_DOMAIN)/auth/callback" }
             - { name: FRONTEND_URL, value: "https://$(APP_DOMAIN)" }

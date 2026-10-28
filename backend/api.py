@@ -7,7 +7,7 @@ StockRadar IN — FastAPI Backend
 • REST API consumed by the React dashboard
 """
 
-import sys, os, json, sqlite3, logging, math
+import sys, os, json, secrets, sqlite3, logging, math
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -440,6 +440,38 @@ def trigger(request: StarletteRequest, background_tasks: BackgroundTasks, email:
         return {"status": "already_running", "message": "Analysis already in progress"}
 
     audit("trigger.accepted", identity=who, ip=ip, email=email)
+    background_tasks.add_task(analysis_job, send_email=email)
+    return {"status": "triggered", "message": "Analysis started in background"}
+
+
+# ── Internal trigger (Kubernetes CronJob) ──────────────────────────────────────
+# The scheduled-run entry point once the scheduler moves out of this process
+# (docs/k8s/PLAN.md step 1). Machine-to-machine, so a shared bearer token
+# instead of a session + CSRF. Deliberately outside /api/: the frontend nginx
+# forwards only /api/ and /auth/, so this is reachable from inside the cluster
+# and nowhere else. With the token unset (the default, and the live VM) the
+# route answers 404 as if it did not exist.
+INTERNAL_TRIGGER_TOKEN = os.environ.get("INTERNAL_TRIGGER_TOKEN", "").strip()
+
+
+@app.post("/internal/run", include_in_schema=False)
+def internal_run(request: StarletteRequest, background_tasks: BackgroundTasks, email: bool = True):
+    if not INTERNAL_TRIGGER_TOKEN:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    ip = client_ip(request, TRUST_PROXY_HEADERS)
+    supplied = request.headers.get("authorization", "")
+    if not secrets.compare_digest(supplied.encode(), f"Bearer {INTERNAL_TRIGGER_TOKEN}".encode()):
+        audit("internal_run.rejected", identity="cronjob", ip=ip, reason="bad_token")
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Not an error for the caller: the CronJob succeeded at its job, which was
+    # to make sure a run happens. 200 keeps it from retrying into the same run.
+    if _run_is_active():
+        audit("internal_run.rejected", identity="cronjob", ip=ip, reason="already_running")
+        return {"status": "already_running", "message": "Analysis already in progress"}
+
+    audit("internal_run.accepted", identity="cronjob", ip=ip, email=email)
     background_tasks.add_task(analysis_job, send_email=email)
     return {"status": "triggered", "message": "Analysis started in background"}
 

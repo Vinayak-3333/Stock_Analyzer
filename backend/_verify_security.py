@@ -135,6 +135,35 @@ with TestClient(api.app) as c:
     check("  60x /api/health all 200",
           {c.get("/api/health").status_code for _ in range(60)}, {200})
 
+    # ── k8s CronJob entry point: /internal/run ────────────────────────────────
+    # The client still carries the logged-in session cookie from Phase 3, so
+    # these also prove a browser session can't stand in for the token.
+    # analysis_job is stubbed so an accepted call doesn't start a real run.
+    print("\n-- /internal/run (CronJob trigger) --")
+    security._WINDOWS.clear()
+    real_job, real_token = api.analysis_job, api.INTERNAL_TRIGGER_TOKEN
+    calls = []
+    api.analysis_job = lambda send_email=True: calls.append(send_email)
+    try:
+        api.INTERNAL_TRIGGER_TOKEN = ""
+        check("  token unset -> 404", c.post("/internal/run").status_code, 404)
+        api.INTERNAL_TRIGGER_TOKEN = "verify-internal-token"
+        check("  session + CSRF, no token -> 401",
+              c.post("/internal/run", headers={"X-CSRF-Token": CSRF}).status_code, 401)
+        check("  wrong token -> 401",
+              c.post("/internal/run", headers={"Authorization": "Bearer nope"}).status_code, 401)
+        check("  token without 'Bearer ' -> 401",
+              c.post("/internal/run", headers={"Authorization": "verify-internal-token"}).status_code, 401)
+        ok = c.post("/internal/run?email=false",
+                    headers={"Authorization": "Bearer verify-internal-token"})
+        check("  right token -> 200", ok.status_code, 200)
+        check("  -> triggered", ok.json().get("status"), "triggered")
+        check("  job ran once, email=False", calls, [False])
+        check("  not in the OpenAPI schema",
+              "/internal/run" in api.app.openapi().get("paths", {}), False)
+    finally:
+        api.analysis_job, api.INTERNAL_TRIGGER_TOKEN = real_job, real_token
+
     # ── Phase 4: SR-9 audit trail ─────────────────────────────────────────────
     print("\n-- SR-9: audit trail --")
     security._WINDOWS.clear()
@@ -144,6 +173,8 @@ with TestClient(api.app) as c:
         body = audit_file.read_text(encoding="utf-8", errors="replace")
         check("  records csrf denials", "AUDIT csrf.blocked" in body, True)
         check("  records rate-limit blocks", "AUDIT ratelimit.blocked" in body, True)
+        check("  records internal_run rejections", "AUDIT internal_run.rejected" in body, True)
+        check("  records internal_run accepts", "AUDIT internal_run.accepted" in body, True)
         check("  lines carry ip=", "ip=" in body, True)
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
