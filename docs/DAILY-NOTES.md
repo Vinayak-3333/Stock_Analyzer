@@ -179,8 +179,12 @@ The URL is only a request; NSE answers it with whatever session it holds.
 ### Open
 - **Labels already filled stay as they are**: `backfill_labels` never
   overwrites, so labels computed from `MAX(close)` or across a phantom
-  Sunday keep those values. Option: clear labels scored in the last 45 days
-  and let the next run recompute them.
+  Sunday keep those values. Decided to clear the lab's last 45 days, but
+  there was nothing to clear: the lab's `score_history` starts 26 Oct and
+  has **0 labels filled** (2,348 rows), so all of them get the new rule.
+  The live VM's older labels are untouched; revisit at cutover.
+- Lab pinned to `afbdf2f` (`f11f2a7`), so the 09:15 run tests defects #2 and #3
+  together.
 - A split or bonus between scoring and the label date still gives a wrong
   label from either source; it needs a corporate-actions adjustment.
 - Lab runs `25d4c3b` since 00:39 IST (pin `25b31ff`, clean startup). The
