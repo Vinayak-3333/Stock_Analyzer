@@ -139,11 +139,16 @@ deep run), `as_of` 15:55:02, NEUTRAL / VIX 15.2 / NIFTY +1.05%.
   against NSE: the 15:30 refresh took **234 s** instead of ~32 s. The result
   is still correct, because the snapshot is tagged with the run it refreshed
   and `/api/latest` ignores a snapshot of an older run. The cost is
-  duplicated NSE load at the two busiest moments. Not fixed yet.
+  duplicated NSE load at the two busiest moments. **Fixed 2026-10-30:** the
+  refresh schedule moved to `2-57/5` (09:02 … 15:57), so it always arrives
+  after a deep run has started and gets `skipped`. Chosen over a code change
+  ("deep run cancels a running refresh") as the smallest fix. Remaining
+  edge: a deep-run Job that starts more than 2 min late
+  (`startingDeadlineSeconds: 600`) could still coincide with a refresh.
 
 ### Open
-- Fix the 09:15 / 15:30 race (offset the refresh schedule, or give the deep
-  run priority).
+- Apply the new refresh schedule to the lab: `kubectl apply -k deploy/k8s/lab`.
+  The fix is committed but not yet live there.
 - Audit defects #2 (`company_name == symbol`, `industry == "Unknown"`) and
   #3 (`raw_ohlcv` 100% Yahoo) are still open.
 - Carried over: region move + billing upgrade before 2027-01-23; k8s plan

@@ -103,17 +103,20 @@ spec:
                 requests: { cpu: 10m, memory: 16Mi }
                 limits:   { memory: 32Mi }
 ---
-# Intraday live refresh: every 5 minutes, 09:00–15:55 IST, Mon–Fri. Re-scores
+# Intraday live refresh: every 5 minutes, 09:02–15:57 IST, Mon–Fri. Re-scores
 # the latest deep run on live NSE data into live_snapshot (core/live_refresh.py);
 # never emails, never writes the run history. The backend answers "skipped"
-# while a deep run is in progress, so the two never overlap.
+# while a deep run is in progress. That guard only works if the run has
+# started first: on :00/:05 minutes the refresh fired in the same second as the
+# 09:15 and 15:30 runs, won the race by ~0.1 s and ran alongside them. Offset
+# by 2 minutes so it always arrives after a deep run has started.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: stockradar-live-refresh
   labels: { app: stockradar-live-refresh }
 spec:
-  schedule: "*/5 9-15 * * 1-5"
+  schedule: "2-57/5 9-15 * * 1-5"
   timeZone: Asia/Kolkata
   concurrencyPolicy: Forbid
   # A missed tick is worthless 5 minutes later — the next one replaces it.
