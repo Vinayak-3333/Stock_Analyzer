@@ -123,11 +123,27 @@ reuses `INTERNAL_TRIGGER_TOKEN` and 404s while it is unset, so the live VM,
 which doesn't set it, is unaffected until the k8s cutover. Only the lab
 runs the refresh.
 
+### Verified on the lab (checked 2026-10-30)
+Lab runs `ec6b9d0` (pin committed in `499b805`). First full market day of
+the refresh CronJob: **82 of 84** slots from 09:00 to 15:55 refreshed, typically
+in 31–36 s, with 397–400/400 stocks re-scored (348/400 at 09:15, right after
+the open). The two missing slots, 09:20 and 15:35, fell inside deep runs and
+were skipped by design. The endpoint returns `skipped` without logging, so
+those slots show up only as gaps. `live_snapshot` holds `run_id` 6 (the 15:30
+deep run), `as_of` 15:55:02, NEUTRAL / VIX 15.2 / NIFTY +1.05%.
+
+### Found
+- **The refresh and the deep run race at 09:15 and 15:30.** Both CronJobs
+  fire in the same second. The refresh was accepted ~0.1 s before the run
+  started, so the "deep run active" guard passed and both ran together
+  against NSE: the 15:30 refresh took **234 s** instead of ~32 s. The result
+  is still correct, because the snapshot is tagged with the run it refreshed
+  and `/api/latest` ignores a snapshot of an older run. The cost is
+  duplicated NSE load at the two busiest moments. Not fixed yet.
+
 ### Open
-- Lab pinned to `ec6b9d0` (committed 2026-10-30). Whether the lab is
-  actually running it hasn't been verified; check that the first
-  `stockradar-live-refresh` Jobs during market hours produce a
-  `live_snapshot`.
+- Fix the 09:15 / 15:30 race (offset the refresh schedule, or give the deep
+  run priority).
 - Audit defects #2 (`company_name == symbol`, `industry == "Unknown"`) and
   #3 (`raw_ohlcv` 100% Yahoo) are still open.
 - Carried over: region move + billing upgrade before 2027-01-23; k8s plan
