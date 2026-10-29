@@ -17,6 +17,7 @@ Kafka topics published:
   - nse.options      — option chain summary
 """
 
+import os
 import requests
 import threading
 import time
@@ -270,7 +271,9 @@ def collect_all_quotes(session: requests.Session = None) -> dict:
                 "nearWKH":     s.get("nearWKH"),
                 "nearWKL":     s.get("nearWKL"),
                 "perChange365d": s.get("perChange365d"),
-                "companyName": (s.get("meta") or {}).get("companyName", sym),
+                # NSE no longer sends `meta` here; get_symbol_meta() fills
+                # these for Tier 2. Empty, not the symbol, so fallbacks work.
+                "companyName": (s.get("meta") or {}).get("companyName", ""),
                 "industry":    (s.get("meta") or {}).get("industry", ""),
                 "isin":        (s.get("meta") or {}).get("isin", ""),
                 "index":       index_name,
@@ -403,6 +406,92 @@ def save_delivery_to_lake(records: list[dict]):
     """)
     conn.commit()
     log.info("Saved %d delivery records to lake", len(records))
+
+
+# ── 2b. Company name + industry classification ────────────────────────────────
+# equity-stock-indices dropped its `meta` object and quote-equity now answers
+# 403 (both verified 2026-10-30), so names and industries come from the quote
+# page's own API. A classification rarely changes: cached in the lake, so after
+# the first run only symbols new to the Tier-2 shortlist cost a call.
+
+SYMBOL_META_TTL_DAYS = int(os.getenv("SYMBOL_META_TTL_DAYS", "30"))
+_META_FIELDS = ("company_name", "macro", "sector", "industry", "basic_industry", "sector_index")
+
+
+def fetch_symbol_meta(session: requests.Session, symbol: str) -> Optional[dict]:
+    """Company name + NSE classification for one symbol, or None."""
+    data = _nse_get(session, "NextApi/apiClient/GetQuoteApi", {
+        "functionName": "getSymbolData", "marketType": "N", "series": "EQ", "symbol": symbol,
+    })
+    rows = (data or {}).get("equityResponse") or []
+    if not rows:
+        return None
+    md = rows[0].get("metaData") or {}
+    si = rows[0].get("secInfo") or {}
+    meta = {
+        "company_name":   (md.get("companyName") or "").strip(),
+        "macro":          (si.get("macro") or "").strip(),
+        "sector":         (si.get("sector") or "").strip(),
+        "industry":       (si.get("industryInfo") or "").strip(),
+        "basic_industry": (si.get("basicIndustry") or "").strip(),
+        # "-" when the stock is in no sectoral index
+        "sector_index":   (si.get("pdSectorInd") or "").strip().strip("-"),
+    }
+    # NSE answers unknown symbols with an all-null row
+    return meta if meta["company_name"] or meta["industry"] else None
+
+
+def get_symbol_meta(symbols: list[str], session: requests.Session = None) -> dict[str, dict]:
+    """
+    {symbol: meta} for *symbols*: fresh lake rows first, NSE for the rest.
+    Symbols NSE has nothing for are left out — callers keep their fallbacks.
+    """
+    from core.lake.manager import get_lake
+
+    out: dict[str, dict] = {}
+    try:
+        conn = get_lake()
+        cached = conn.execute(
+            f"SELECT symbol, {', '.join(_META_FIELDS)} FROM symbol_meta "
+            "WHERE as_of >= current_date - ?",
+            [SYMBOL_META_TTL_DAYS],
+        ).fetchall()
+        wanted = set(symbols)
+        for row in cached:
+            if row[0] in wanted:
+                out[row[0]] = dict(zip(_META_FIELDS, row[1:]))
+    except Exception as exc:
+        log.debug("symbol_meta cache read failed: %s", exc)
+
+    missing = [s for s in symbols if s not in out]
+    fetched: dict[str, dict] = {}
+    if missing:
+        if session is None:
+            session = _make_session()
+        # The engine's "nse" policy caps real concurrency; this only queues.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            for sym, meta in zip(missing, pool.map(lambda s: fetch_symbol_meta(session, s), missing)):
+                if meta:
+                    fetched[sym] = meta
+        out.update(fetched)
+
+    if fetched:
+        try:
+            conn = get_lake()
+            df = pd.DataFrame([{"symbol": s, **m} for s, m in fetched.items()])
+            conn.execute(f"""
+                INSERT OR REPLACE INTO symbol_meta (symbol, {', '.join(_META_FIELDS)}, as_of)
+                SELECT symbol, {', '.join(_META_FIELDS)}, current_date FROM df
+            """)
+            conn.commit()
+        except Exception as exc:
+            log.debug("symbol_meta cache write failed: %s", exc)
+
+    log.info("Symbol meta: %d/%d (%d cached, %d fetched from NSE, %d unavailable)",
+             len(out), len(symbols), len(out) - len(fetched), len(fetched),
+             len(symbols) - len(out))
+    return out
 
 
 # ── 3. FII / DII Flow ─────────────────────────────────────────────────────────

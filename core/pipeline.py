@@ -47,6 +47,7 @@ from core.collectors.nse import (
     fetch_equity_symbols_from_bhavcopy,
     fetch_live_indices,
     fetch_traded_quotes,
+    get_symbol_meta,
     save_known_symbols_to_lake,
 )
 from core.features.live_bar import parse_nse_time, quote_from_index_row, with_live_bar
@@ -279,7 +280,7 @@ def _quote_from_history(raw_sym: str, df: pd.DataFrame) -> dict | None:
         "totalTradedVolume":  _clean_number(last.get("Volume")),
         "yearHigh":           None,  # filled from t_high_52w at result time
         "yearLow":            None,
-        "companyName":        raw_sym,
+        "companyName":        "",
         "industry":           "",
         "index":              "YFINANCE",
         "fetched_at":         datetime.now().isoformat(),
@@ -435,6 +436,11 @@ def _score_inputs(features: dict, quote: dict, market: dict) -> tuple[dict, dict
     stock_meta = {
         "symbol": features.get("symbol"),
         "industry": quote.get("industry") or features.get("f_industry") or "",
+        # Every level of NSE's classification, for the sector factor's
+        # keyword rules ("Diversified FMCG" alone says less than its sector).
+        "classification": " / ".join(
+            v for v in (quote.get("sector"), quote.get("industry"), quote.get("basic_industry")) if v
+        ),
         "market_cap_cr": features.get("f_market_cap_cr"),
         "avg_volume": quote.get("totalTradedVolume"),
         "pledged_pct": features.get("f_pledged_pct"),
@@ -537,7 +543,7 @@ def _result_from_features(symbol: str, features: dict, quote: dict, score_result
         "revenue_growth": features.get("f_revenue_growth_1y"),
         "eps_growth": features.get("f_eps_growth_1y"),
         "analyst_rating": features.get("f_analyst_rating"),
-        "company_name": quote.get("companyName") or features.get("f_company_name"),
+        "company_name": quote.get("companyName") or features.get("f_company_name") or symbol.replace(".NS", ""),
         "industry": quote.get("industry") or features.get("f_industry") or "Unknown",
         "delivery_pct": features.get("i_delivery_pct"),
         "delivery_pct_5d": features.get("i_delivery_5d_avg"),
@@ -788,6 +794,15 @@ def run_modular_analysis(limit: int | None = None) -> list[dict]:
         # symbols are dropped and the run completes with partial results.
         results: list[dict] = []
         tier2_start = time.monotonic()
+        # Real company names (also the news-search query) and NSE industries.
+        for sym, meta in get_symbol_meta([s for s, _t, _d in shortlist], session).items():
+            quotes[sym] = {
+                **quotes.get(sym, {}),
+                "companyName":    meta.get("company_name") or quotes.get(sym, {}).get("companyName", ""),
+                "industry":       meta.get("industry") or quotes.get(sym, {}).get("industry", ""),
+                "sector":         meta.get("sector") or "",
+                "basic_industry": meta.get("basic_industry") or "",
+            }
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
         futures = {
             executor.submit(analyse_symbol, sym, quotes.get(sym, {}), nifty_df, regime, market, session, df): sym

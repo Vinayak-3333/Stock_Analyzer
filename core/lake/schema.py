@@ -311,6 +311,20 @@ DDL_STATEMENTS = [
     )
     """,
 
+    # ── Company name + NSE industry classification (getSymbolData cache) ──────
+    """
+    CREATE TABLE IF NOT EXISTS symbol_meta (
+        symbol          VARCHAR PRIMARY KEY,
+        company_name    VARCHAR,
+        macro           VARCHAR,   -- e.g. 'Financial Services'
+        sector          VARCHAR,   -- e.g. 'Financial Services'
+        industry        VARCHAR,   -- e.g. 'Banks'
+        basic_industry  VARCHAR,   -- e.g. 'Private Sector Bank'
+        sector_index    VARCHAR,   -- e.g. 'NIFTY BANK'
+        as_of           DATE
+    )
+    """,
+
     # ── Indexes for common query patterns ─────────────────────────────────────
     "CREATE INDEX IF NOT EXISTS idx_ohlcv_sym_date     ON raw_ohlcv(symbol, date)",
     "CREATE INDEX IF NOT EXISTS idx_delivery_sym_date  ON raw_delivery(symbol, date)",

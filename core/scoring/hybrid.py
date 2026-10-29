@@ -17,6 +17,7 @@ Final score = weighted sum * regime multiplier.
 from __future__ import annotations
 import math
 import logging
+import re
 from typing import Optional
 
 log = logging.getLogger("stockradar.scoring")
@@ -313,6 +314,17 @@ def sentiment_score(sent: dict) -> tuple[float, list[str]]:
 
 # ── 5. Sector Score (0–100) ────────────────────────────────────────────────────
 
+# Keyword rules over NSE's classification ("Information Technology / IT -
+# Software / ..."). Whole words only: as substrings, "IT" matched "CapITal
+# Markets" and "UtilITies", and "OIL" matched "BOILers". Harmless while
+# industry was always empty (NSE dropped `meta`), wrong once it was filled.
+_SECTOR_IT_PHARMA   = re.compile(r"\b(IT|Information Technology|Software|Pharma\w*|Consult\w*)\b", re.I)
+_SECTOR_CRUDE_USERS = re.compile(r"\b(Auto\w*|FMCG|Fast Moving Consumer Goods|Aviation|Airlines?|Logistics)\b", re.I)
+_SECTOR_CHEAP_CRUDE = re.compile(r"\b(Auto\w*|FMCG|Fast Moving Consumer Goods|Logistics)\b", re.I)
+_SECTOR_EXPORTERS   = re.compile(r"\b(IT|Information Technology|Software|Pharma\w*|Export\w*)\b", re.I)
+_SECTOR_IMPORTERS   = re.compile(r"\b(Oil|Import\w*|Refin\w*)\b", re.I)
+
+
 def sector_score(market: dict, symbol_sector: str = "") -> tuple[float, list[str]]:
     """
     Score based on: sector momentum, market breadth, crude/USD impact.
@@ -341,21 +353,20 @@ def sector_score(market: dict, symbol_sector: str = "") -> tuple[float, list[str
     elif breadth_pct < 45:  score -= 5
 
     # Crude oil impact (IT/Pharma benefit from low crude; Auto/FMCG hurt by high crude)
-    sector_upper = symbol_sector.upper()
     if crude_regime == 1:   # high crude (>90)
-        if any(s in sector_upper for s in ["IT", "PHARMA", "SOFTWARE", "CONSULT"]):
+        if _SECTOR_IT_PHARMA.search(symbol_sector):
             score += 5; reasons.append("+5: IT/Pharma less affected by crude")
-        elif any(s in sector_upper for s in ["AUTO", "FMCG", "AVIATION", "LOGISTICS"]):
+        elif _SECTOR_CRUDE_USERS.search(symbol_sector):
             score -= 8; reasons.append("-8: Sector hurt by high crude oil")
     elif crude_regime == -1:  # low crude (<70)
-        if any(s in sector_upper for s in ["AUTO", "FMCG", "LOGISTICS"]):
+        if _SECTOR_CHEAP_CRUDE.search(symbol_sector):
             score += 5
 
     # USD/INR impact — strong rupee helps importers
     if usdinr_regime == 1:   # weak rupee (>85)
-        if any(s in sector_upper for s in ["IT", "SOFTWARE", "PHARMA", "EXPORT"]):
+        if _SECTOR_EXPORTERS.search(symbol_sector):
             score += 5; reasons.append("+5: Weak rupee boosts IT/Pharma exports")
-        elif any(s in sector_upper for s in ["OIL", "IMPORT", "REFIN"]):
+        elif _SECTOR_IMPORTERS.search(symbol_sector):
             score -= 5
 
     return _clamp(score), reasons
@@ -491,7 +502,9 @@ def calculate_final_score(
     t_score, t_reasons = technical_score(technical)
     i_score, i_reasons = institutional_score(institutional)
     s_score, s_reasons = sentiment_score(sentiment)
-    sec_score, sec_reasons = sector_score(market, stock_meta.get("industry", ""))
+    sec_score, sec_reasons = sector_score(
+        market, stock_meta.get("classification") or stock_meta.get("industry", "")
+    )
     r_score, r_reasons, disqualified = risk_score(stock_meta, fundamental)
 
     final, signal, multiplier = combine_factor_scores(
@@ -527,4 +540,3 @@ def calculate_final_score(
     }
 
 
-import re  # needed for reason sorting — import here to avoid top-level circular issues

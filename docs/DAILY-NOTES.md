@@ -51,6 +51,80 @@ future you) can pick up without re-deriving context.
 | [DN-29](#dn-29) | 2026-10-29 | Date the live bar by NSE's timestamp, never the wall clock; keep it out of `raw_ohlcv` |
 | [DN-30](#dn-30) | 2026-10-29 | Intraday refresh re-scores only price-driven factors; the rest stay from the deep run |
 | [DN-31](#dn-31) | 2026-10-29 | Refresh writes a one-row `live_snapshot`, never `runs`; route 404s while the token is unset |
+| [DN-32](#dn-32) | 2026-10-30 | Names and industries from NSE `getSymbolData`, Tier 2 only, cached 30 days in the lake |
+| [DN-33](#dn-33) | 2026-10-30 | Sector keyword rules match whole words over the full NSE classification |
+
+---
+
+## 2026-10-30
+
+Fixed audit defect #2 (every result: `company_name == symbol`,
+`industry == "Unknown"`). Earlier the same day: lab verification of the
+live refresh and the 09:15 / 15:30 race fix, recorded under 2026-10-29.
+
+### Found
+- **The defect was bigger than display.** The company name is also the
+  news-search query (`analyse_symbol` → sentiment), so sentiment has been
+  searching Google News by ticker. And the industry string feeds the sector
+  factor's crude/rupee rules, which never fired because it was always empty.
+- **The fallbacks never fired either:** with `meta` gone, `companyName`
+  defaulted to the symbol, which is truthy, so
+  `quote.get("companyName") or features.get("f_company_name")` threw away
+  the Yahoo `longName` that Tier 2 had already fetched.
+- **`quote-equity` answers 403** on a session that works for every other NSE
+  endpoint, so the endpoint is retired. It was only the live fallback for
+  delivery %: the bhavcopy in the lake supplies it (400/400 in run 6), so
+  nothing visible broke. A symbol missing from the bhavcopy now gets no
+  delivery %. Not fixed; `getSymbolData` carries delivery too if it's ever
+  needed.
+- **The old substring rules would have mis-scored once industry was
+  filled:** "IT" matched "Capital Markets" (CDSL) and "Utility Vehicles"
+  (Maruti, +5 as an IT exporter).
+- `sector_momentum` (the sector factor's largest term, ±15) is the
+  **average of all sector indices**, not the stock's own sector
+  (`store.py`). Now that `symbol_meta.sector_index` is stored (e.g.
+  `NIFTY IT`), it could be per-stock. Not changed: it would move every
+  sector score.
+
+### Shipped
+- `get_symbol_meta()` (`core/collectors/nse.py`) + lake table
+  `symbol_meta`: company name, macro, sector, industry, basic industry and
+  sector index per symbol. Called once before Tier 2 for the shortlist and
+  merged into the quotes, so the result, news search and scoring all see it.
+  Tested against live NSE: cold 5 symbols in 3.1 s, warm all cached; unknown
+  symbols are skipped and keep the fallbacks (Yahoo `longName`, then the
+  symbol; industry "Unknown").
+- Quote builders leave `companyName` empty instead of the symbol, so the
+  fallback chain works.
+- `sector_score` gets `classification` (`sector / industry / basic
+  industry`) and matches whole words.
+- `_verify_security.py` 62/62.
+
+### <a id="dn-32"></a>DN-32 — `getSymbolData`, Tier 2 only, cached 30 days
+NSE's quote-page API (`NextApi/apiClient/GetQuoteApi?functionName=getSymbolData`)
+has the real name and NSE's own four-level classification. **Rejected:**
+`EQUITY_L.csv`, which is already downloaded each run and has names but no
+industry. Yahoo's `info` sector/industry is US-style ("Technology") and
+doesn't match the NSE vocabulary or the sector indices. Only the ~400 Tier-2
+symbols are fetched, because only they reach results and news. That's ~400
+calls on the first run, then only shortlist newcomers.
+`SYMBOL_META_TTL_DAYS` (default 30) because a classification rarely changes.
+
+### <a id="dn-33"></a>DN-33 — Whole-word keyword rules over the full classification
+The rules match `sector / industry / basic industry` joined, because a
+single level loses information: Dabur's industry "Personal Products" says
+nothing about FMCG, its sector does. Matching is whole-word to stop the
+substring hits above. Keyword lists were mapped onto NSE's vocabulary
+("Fast Moving Consumer Goods" = FMCG, "Airline" = aviation) and otherwise
+kept as written, including the low-crude bonus leaving aviation out.
+**Scores change by design:** stocks in matching sectors now get the
+±5–8 crude/rupee adjustments to the sector factor (10% weight), which no
+stock has received since NSE dropped `meta`.
+
+### Open
+- Deploy: the CI image for this commit, then pin the lab and compare a
+  run's names / industries / sector factors with run 6.
+- Per-stock `sector_momentum` from `sector_index` (see Found).
 
 ---
 
