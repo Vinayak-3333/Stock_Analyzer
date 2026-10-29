@@ -147,8 +147,10 @@ deep run), `as_of` 15:55:02, NEUTRAL / VIX 15.2 / NIFTY +1.05%.
   (`startingDeadlineSeconds: 600`) could still coincide with a refresh.
 
 ### Open
-- Apply the new refresh schedule to the lab: `kubectl apply -k deploy/k8s/lab`.
-  The fix is committed but not yet live there.
+- New refresh schedule applied to the lab 2026-10-30 (only
+  `stockradar-live-refresh` changed). Confirm on the next market day that
+  the 09:17 and 15:32 refreshes log as skipped and the 09:22 / 15:37 ones
+  refresh the new run.
 - Audit defects #2 (`company_name == symbol`, `industry == "Unknown"`) and
   #3 (`raw_ohlcv` 100% Yahoo) are still open.
 - Carried over: region move + billing upgrade before 2027-01-23; k8s plan
