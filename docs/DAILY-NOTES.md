@@ -185,6 +185,35 @@ The URL is only a request; NSE answers it with whatever session it holds.
   The live VM's older labels are untouched; revisit at cutover.
 - Lab pinned to `afbdf2f` (`f11f2a7`), so the 09:15 run tests defects #2 and #3
   together.
+
+### Verified on the lab — manual run 7 (00:58–01:07 IST)
+Started with `kubectl create job --from=cronjob/stockradar-analysis-0915 manual-check-1`.
+Universe 1,823, Tier 2 400/400 in 134 s, 8m14s total.
+- **#2:** `Symbol meta: 395/400 (0 cached, 395 fetched from NSE, 5 unavailable)`,
+  ~40 s. Results: name == symbol **0/400** (run 6: 400), industry
+  "Unknown" **5/400** (run 6: 400). E.g. OFSS → "Oracle Financial Services
+  Software Limited" / "IT - Software". `symbol_meta` holds 395 rows.
+- **#3:** `Bhavcopy backfill: 28 missing sessions added` in 4 s, 15 Sep–29 Oct,
+  2 Oct and 20 Oct skipped as holidays. No weekend rows, series all `EQ`
+  (83,076 rows). Labels still 0/2,748: the oldest score is 26 Oct and a
+  5-day label needs 5 sessions, so the first fill is expected from ~2 Nov.
+
+### Found in run 7 — the sector factor is a constant
+**Every stock got the same sector factor** in both runs: 55.0 for all 400 in
+run 6, 65.0 for all 400 in run 7. No crude/rupee reason appeared anywhere.
+So DN-33's "scores change by design" did **not** happen. The industry is now
+right, but the rules it feeds are dead for two more reasons, both the same
+class of bug as DN-01 (producer and consumer disagree on keys/types):
+- `crude_regime` arrives as `'RISING'`/`'STABLE'`/`'FALLING'` (`regime.py`),
+  and `sector_score` compares it with `1`/`-1`: never true.
+- `usdinr_regime` is never emitted; `regime.py` emits `usdinr_trend`
+  (`'STRENGTHENING'`/`'WEAKENING'`/`'STABLE'`). It reads as 0.
+- `sector_momentum` is the all-sector average (Found above), the same for
+  every stock.
+
+Net effect: the sector factor (10% weight) currently ranks no stock above
+another. Not fixed. Fixing it changes every score, and "RISING crude" vs the
+rule's "crude > 90" are different conditions, so the mapping is a decision.
 - A split or bonus between scoring and the label date still gives a wrong
   label from either source; it needs a corporate-actions adjustment.
 - Lab runs `25d4c3b` since 00:39 IST (pin `25b31ff`, clean startup). The
