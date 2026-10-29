@@ -122,8 +122,10 @@ kept as written, including the low-crude bonus leaving aviation out.
 stock has received since NSE dropped `meta`.
 
 ### Open
-- Deploy: the CI image for this commit, then pin the lab and compare a
-  run's names / industries / sector factors with run 6.
+- Lab runs `25d4c3b` since 00:39 IST (pin `25b31ff`, clean startup). The
+  09:15 deep run is the first with the fix: compare its names / industries /
+  sector factors with run 6, and check the `Symbol meta:` log line (~400
+  fetched on this first run).
 - Per-stock `sector_momentum` from `sector_index` (see Found).
 
 ---
