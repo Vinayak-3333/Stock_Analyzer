@@ -53,6 +53,8 @@ future you) can pick up without re-deriving context.
 | [DN-31](#dn-31) | 2026-10-29 | Refresh writes a one-row `live_snapshot`, never `runs`; route 404s while the token is unset |
 | [DN-32](#dn-32) | 2026-10-30 | Names and industries from NSE `getSymbolData`, Tier 2 only, cached 30 days in the lake |
 | [DN-33](#dn-33) | 2026-10-30 | Sector keyword rules match whole words over the full NSE classification |
+| [DN-34](#dn-34) | 2026-10-30 | `raw_ohlcv` stays Yahoo; labels take NSE's bhavcopy first, gap-filled each run |
+| [DN-35](#dn-35) | 2026-10-30 | Date bhavcopy rows by the file's `DATE1`, never the URL |
 
 ---
 
@@ -121,7 +123,66 @@ kept as written, including the low-crude bonus leaving aviation out.
 ±5–8 crude/rupee adjustments to the sector factor (10% weight), which no
 stock has received since NSE dropped `meta`.
 
+### Audit defect #3 (`raw_ohlcv` is 100% Yahoo)
+**Found**
+- The defect as written wasn't the problem. `raw_ohlcv` holds the Yahoo
+  histories the indicators run on, fetched with `auto_adjust=True`
+  (dividend/split-adjusted, rewritten on every corporate action). The only
+  `nse_live` writer, `run_full_collection`, dated live quotes by the wall
+  clock: enabling it would have put unfinished bars into the labels.
+- **The real problem was the labels.** They took `MAX(close)` over the
+  bhavcopy and Yahoo. Yahoo vs bhavcopy on 2,919 overlapping rows (local
+  lake): 89.4% within 0.5%, 3.1% off by ≥2% (splits: MWL −90%, GOODLUCK
+  −66.7%, TDPOWERSYS −50%), Yahoo lower in 23% (dividends), **higher in
+  62 rows (up to +5.6%), which `MAX` picked**. And the bhavcopy only had
+  the sessions a run happened to save: 5 dates locally, 2 on the lab.
+- **Phantom bhavcopy sessions.** NSE serves the previous session's file
+  under some non-trading days' URLs (Sun 25 Oct → 23 Oct data, holiday
+  2 Oct → 1 Oct). A missing file returns HTML with status 200, not a 404.
+  `fetch_bhavcopy` stamped rows with the URL date, so a Monday 09:15 run
+  (today's file not out yet, walk back to Sunday) stored Friday's prices
+  as a Sunday session in `raw_bhavcopy` and `raw_delivery`. That shifts
+  the trading-day count behind every label. Likely on the live VM (26 Oct
+  09:15 run); the lab has none.
+- `raw_bhavcopy.series` was stored space-padded (`' EQ'`). Harmless:
+  every reader stripped it.
+
+**Shipped**
+- `_bhavcopy_file()`: dates rows by `DATE1` and treats an HTML body as
+  missing. `fetch_bhavcopy` uses it.
+- `backfill_bhavcopy()`, run before `backfill_labels()` each deep run in its
+  own `try`: drops weekend-dated rows, normalises the series, and fetches
+  every missing weekday in `BHAVCOPY_BACKFILL_DAYS` (default 45). A file
+  holding a different session means a holiday and is skipped.
+- Labels: bhavcopy close first, Yahoo only where it has no row.
+- `run_full_collection` no longer writes `raw_ohlcv`.
+- Tested on a copy of the local lake with a planted Sunday phantom: the
+  phantom was dropped from both tables, 18 sessions were added in 5 s, the
+  holidays 2 Oct and 20 Oct were skipped, and a second call added 0. 15 of
+  53,928 label prices changed in the last 30 days; labels and factor IC run.
+  `_verify_security.py` 62/62.
+
+#### <a id="dn-34"></a>DN-34 — `raw_ohlcv` stays Yahoo; labels take the bhavcopy first
+A label is a return from the scored price (NSE's actual live price) to a
+later close, so the later close must also be an actual price. That is the
+bhavcopy. Yahoo's adjusted series stays where it fits, as indicator input.
+**Rejected:** writing NSE live quotes into `raw_ohlcv` (unfinished bars),
+and switching the histories to `auto_adjust=False` (splits would then break
+every indicator window). Gap-filling 45 days costs ~1 small archive
+download per missing session on the first run, then about none; holidays in
+the window are re-fetched each run (2 files today).
+
+#### <a id="dn-35"></a>DN-35 — Date bhavcopy rows by `DATE1`, never the URL
+Same principle as DN-25 and DN-29: date data by the source's own clock.
+The URL is only a request; NSE answers it with whatever session it holds.
+
 ### Open
+- **Labels already filled stay as they are**: `backfill_labels` never
+  overwrites, so labels computed from `MAX(close)` or across a phantom
+  Sunday keep those values. Option: clear labels scored in the last 45 days
+  and let the next run recompute them.
+- A split or bonus between scoring and the label date still gives a wrong
+  label from either source; it needs a corporate-actions adjustment.
 - Lab runs `25d4c3b` since 00:39 IST (pin `25b31ff`, clean startup). The
   09:15 deep run is the first with the fix: compare its names / industries /
   sector factors with run 6, and check the `Symbol meta:` log line (~400

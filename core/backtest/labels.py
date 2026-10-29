@@ -5,8 +5,8 @@ Closes the scoring feedback loop:
 
 1. ``backfill_labels()`` — fills ``label_5d_return`` / ``label_10d_return`` /
    ``label_20d_return`` on ``score_history`` rows by looking up the close
-   N *trading days* after each score was recorded (daily bars from
-   ``raw_bhavcopy`` ∪ ``raw_ohlcv``).  Idempotent and incremental: already
+   N *trading days* after each score was recorded (NSE's ``raw_bhavcopy``
+   closes, Yahoo's ``raw_ohlcv`` only where those are missing).  Idempotent and incremental: already
    -filled labels are never overwritten, and rows are retried each run
    until the 20-day label is available.
 
@@ -31,16 +31,21 @@ log = logging.getLogger("stockradar.labels")
 HORIZONS = (5, 10, 20)
 FACTOR_KEYS = ("fundamental", "technical", "institutional", "sentiment", "sector", "risk")
 
-# Daily close per symbol from both lake sources. Bhavcopy covers the whole
-# EQ universe daily; raw_ohlcv covers whatever the pipeline analysed.
+# Daily close per symbol. NSE's bhavcopy wins: it is the actual traded close,
+# like the entry price in score_history. raw_ohlcv is Yahoo with
+# auto_adjust=True — dividend/split-adjusted, rewritten on every corporate
+# action — so it only fills sessions the bhavcopy lacks (BE series, days
+# outside backfill_bhavcopy's window). MAX() over both used to pick Yahoo
+# whenever it was higher (62 of 2,919 overlapping rows, up to +5.6%).
 _PRICE_SOURCE_SQL = """
-    SELECT symbol, date, MAX(close) AS close
-    FROM (
-        SELECT symbol, date, close FROM raw_bhavcopy WHERE close IS NOT NULL AND close > 0
-        UNION ALL
-        SELECT symbol, date, close FROM raw_ohlcv   WHERE close IS NOT NULL AND close > 0
-    )
-    GROUP BY symbol, date
+    SELECT symbol, date, close FROM raw_bhavcopy WHERE close IS NOT NULL AND close > 0
+    UNION ALL
+    SELECT o.symbol, o.date, o.close FROM raw_ohlcv o
+    WHERE o.close IS NOT NULL AND o.close > 0
+      AND NOT EXISTS (
+          SELECT 1 FROM raw_bhavcopy b
+          WHERE b.symbol = o.symbol AND b.date = o.date AND b.close > 0
+      )
 """
 
 _PENDING_SQL = """

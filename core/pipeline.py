@@ -42,6 +42,7 @@ except Exception:
 from core.collectors.nse import (
     _UA,
     _make_session,
+    backfill_bhavcopy,
     collect_all_quotes,
     fetch_cached_symbols_from_lake,
     fetch_equity_symbols_from_bhavcopy,
@@ -875,7 +876,12 @@ def run_modular_analysis(limit: int | None = None) -> list[dict]:
         )
 
         # Close the feedback loop: fill forward-return labels for past runs
-        # now that today's bhavcopy closes are in the lake.
+        # now that today's bhavcopy closes are in the lake — after filling
+        # any sessions no run saved, so labels count NSE's real sessions.
+        try:
+            backfill_bhavcopy()
+        except Exception as exc:
+            log.warning("Bhavcopy backfill failed: %s", exc)
         try:
             from core.backtest.labels import backfill_labels
             backfill_labels()

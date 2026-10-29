@@ -707,25 +707,94 @@ def fetch_bhavcopy(target_date: date = None) -> Optional[pd.DataFrame]:
 
     # Try last 5 days so Monday/post-holiday runs still find the last trading day's file
     for offset in range(5):
-        d = target_date - timedelta(days=offset)
-        url = (
-            f"https://nsearchives.nseindia.com/products/content/"
-            f"sec_bhavdata_full_{d.strftime('%d%m%Y')}.csv"
-        )
-        try:
-            headers = {"User-Agent": _UA, "Referer": _NSE_BASE + "/"}
-            r = get_engine().get("nse_archives", url, headers=headers, retries=0)
-            if len(r.content) > 1000:
-                df = pd.read_csv(io.StringIO(r.text))
-                df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
-                df["date"] = d.isoformat()
-                log.info("Bhavcopy loaded for %s: %d rows", d, len(df))
-                return df
-        except Exception as e:
-            log.debug("Bhavcopy %s failed: %s", d, e)
+        df = _bhavcopy_file(target_date - timedelta(days=offset))
+        if df is not None:
+            return df
 
     log.warning("Bhavcopy not available for recent dates")
     return None
+
+
+def _bhavcopy_file(d: date) -> Optional[pd.DataFrame]:
+    """
+    The sec_bhavdata_full file published under *d*'s URL, or None. Rows are
+    dated by the file's own DATE1 column, not the URL: for some non-trading
+    days NSE serves the previous session's file under that day's name (seen:
+    Sun 25 Oct → 23 Oct data, holiday 2 Oct → 1 Oct), which the URL date
+    turned into a phantom session in raw_bhavcopy / raw_delivery.
+    """
+    url = (
+        f"https://nsearchives.nseindia.com/products/content/"
+        f"sec_bhavdata_full_{d.strftime('%d%m%Y')}.csv"
+    )
+    try:
+        headers = {"User-Agent": _UA, "Referer": _NSE_BASE + "/"}
+        r = get_engine().get("nse_archives", url, headers=headers, retries=0)
+        # Missing files come back as an HTML page, not a 404
+        if len(r.content) <= 1000 or r.text.lstrip().startswith("<"):
+            return None
+        df = pd.read_csv(io.StringIO(r.text))
+        df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
+        if "date1" in df.columns:
+            dates = pd.to_datetime(df["date1"].astype(str).str.strip(), format="%d-%b-%Y", errors="coerce")
+            session = dates.mode()
+            if session.empty:
+                return None
+            df["date"] = session.iloc[0].date().isoformat()
+        else:
+            df["date"] = d.isoformat()
+        log.info("Bhavcopy loaded for %s (requested %s): %d rows", df["date"].iloc[0], d, len(df))
+        return df
+    except Exception as e:
+        log.debug("Bhavcopy %s failed: %s", d, e)
+    return None
+
+
+# Forward-return labels need NSE's closes for every session in their window;
+# a run only saves the previous session's file, so days without a run (or a
+# lab that was down) leave gaps that Yahoo's adjusted closes used to fill.
+BHAVCOPY_BACKFILL_DAYS = int(os.getenv("BHAVCOPY_BACKFILL_DAYS", "45"))
+
+
+def backfill_bhavcopy(days: int = BHAVCOPY_BACKFILL_DAYS) -> int:
+    """
+    Fetch the bhavcopy for every weekday in the last *days* calendar days
+    that raw_bhavcopy doesn't have, and drop weekend-dated rows left by the
+    old URL dating. Returns the number of sessions added.
+    """
+    from core.lake.manager import get_lake
+    conn = get_lake()
+    for table in ("raw_bhavcopy", "raw_delivery"):
+        dropped = conn.execute(
+            f"DELETE FROM {table} WHERE dayofweek(date) IN (0, 6) RETURNING date"
+        ).fetchall()
+        if dropped:
+            log.warning("Dropped %d weekend-dated %s rows (phantom sessions)", len(dropped), table)
+    # Rows saved before the series was stripped read ' EQ'
+    conn.execute("UPDATE raw_bhavcopy SET series = trim(series) WHERE series <> trim(series)")
+    conn.commit()
+
+    have = {r[0] for r in conn.execute(
+        "SELECT DISTINCT date FROM raw_bhavcopy WHERE date >= current_date - ?", [days]
+    ).fetchall()}
+    today = date.today()
+    added = 0
+    for offset in range(days, 0, -1):
+        d = today - timedelta(days=offset)
+        if d.weekday() >= 5 or d in have:
+            continue
+        df = _bhavcopy_file(d)
+        # A different session in the file means d was a holiday
+        if df is None or df["date"].iloc[0] != d.isoformat():
+            continue
+        try:
+            save_bhavcopy_to_lake(df)
+            added += 1
+        except Exception as exc:
+            log.debug("Bhavcopy backfill save failed for %s: %s", d, exc)
+    if added:
+        log.info("Bhavcopy backfill: %d missing sessions added", added)
+    return added
 
 
 def save_bhavcopy_to_lake(df: pd.DataFrame):
@@ -765,9 +834,9 @@ def save_bhavcopy_to_lake(df: pd.DataFrame):
         df_mapped[col] = pd.to_numeric(df_mapped[col], errors="coerce")
     df_mapped["symbol"] = df_mapped["symbol"].astype(str).str.strip()
 
-    # Filter EQ series only
+    # Filter EQ series only (values arrive space-padded: ' EQ')
     if df_mapped["series"].notna().any():
-        df_mapped = df_mapped[df_mapped["series"].astype(str).str.strip() == "EQ"]
+        df_mapped = df_mapped[df_mapped["series"].astype(str).str.strip() == "EQ"].assign(series="EQ")
 
     conn.execute("""
         INSERT OR REPLACE INTO raw_bhavcopy
@@ -820,7 +889,6 @@ def run_full_collection(
     Run all NSE data collection in sequence.
     Returns summary dict with counts.
     """
-    from core.lake.manager import get_lake
     from core.lake.schema import init_schema
     init_schema()
 
@@ -830,24 +898,10 @@ def run_full_collection(
     if collect_quotes:
         quotes = collect_all_quotes(session)
         summary["quotes"] = len(quotes)
-        # Save OHLCV snapshot to lake
-        if quotes:
-            rows = []
-            for sym, q in quotes.items():
-                if q.get("lastPrice"):
-                    rows.append({
-                        "symbol": sym, "date": date.today().isoformat(),
-                        "open": q.get("open"), "high": q.get("dayHigh"),
-                        "low": q.get("dayLow"), "close": q.get("lastPrice"),
-                        "volume": q.get("totalTradedVolume"), "source": "nse_live",
-                    })
-            conn = get_lake()
-            df = pd.DataFrame(rows)
-            conn.execute("""
-                INSERT OR REPLACE INTO raw_ohlcv (symbol, date, open, high, low, close, volume, source)
-                SELECT symbol, date::DATE, open, high, low, close, volume, source FROM df
-            """)
-            conn.commit()
+        # No raw_ohlcv write: a live quote dated by the wall clock is an
+        # unfinished (or, after hours, phantom) session, and raw_ohlcv feeds
+        # the forward-return labels. NSE's completed sessions come from the
+        # bhavcopy (raw_bhavcopy).
 
     if collect_fii:
         fii = fetch_fii_dii(session)
