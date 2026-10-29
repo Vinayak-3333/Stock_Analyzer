@@ -48,6 +48,90 @@ future you) can pick up without re-deriving context.
 | [DN-26](#dn-26) | 2026-10-27 | Kubernetes on a separate k3s lab VM; the live VM is not touched until cutover |
 | [DN-27](#dn-27) | 2026-10-27 | Lab backend strips the scheduler at startup and has no Gmail secret, rather than a code flag or a custom image |
 | [DN-28](#dn-28) | 2026-10-28 | Keep the live VM on `e2-micro` — ~27 min per run is acceptable for two runs a day |
+| [DN-29](#dn-29) | 2026-10-29 | Date the live bar by NSE's timestamp, never the wall clock; keep it out of `raw_ohlcv` |
+| [DN-30](#dn-30) | 2026-10-29 | Intraday refresh re-scores only price-driven factors; the rest stay from the deep run |
+| [DN-31](#dn-31) | 2026-10-29 | Refresh writes a one-row `live_snapshot`, never `runs`; route 404s while the token is unset |
+
+---
+
+## 2026-10-29
+
+Made the dashboard live during market hours. Before today, scores and prices
+were a snapshot from the 09:15 / 15:30 deep runs, and ~1,240 of the ~2,000
+stocks were priced from the last row of a Yahoo daily history, which can be
+a session old. Four commits on `alt-approach`.
+
+### Shipped
+- **Live NSE prices for the whole universe** (`c76c65f`). NIFTY 500 and
+  NIFTY SMALLCAP 500 added to the index list (353 → 763 stocks with full
+  index quotes). Every other stock is now priced from NSE's
+  `live-analysis-stocksTraded` feed: one call, ~2,900 EQ/BE rows. Its
+  volume arrives in **lakhs** and is converted to shares. Yahoo still
+  supplies the 1y histories, and its quote is the fallback when NSE has no
+  row. Local check with Yahoo stubbed: universe 2,000 = `nse_live` 763 +
+  `nse_traded` 1,237, none priced from Yahoo.
+- **Today's live bar in every indicator, plus a live regime** (`f696d38`).
+  New `core/features/live_bar.py`: `with_live_bar()` replaces or appends the
+  session's row in a daily history from NSE's live quote, so indicator
+  windows keep their meaning and the last bar is "now". It is applied to
+  Tier 1/Tier 2 histories and the NIFTY relative-strength frame. The regime
+  gets NIFTY and India VIX live bars from NSE `allIndices` on top of Yahoo
+  daily history, and sectors come live from NSE; its cache dropped from 1 h
+  to 60 s and it carries NSE's `as_of`. Checked against NSE: NIFTY 1d/5d,
+  VIX and stock closes match exactly.
+- **5-minute intraday live refresh** (`ec6b9d0`). `core/live_refresh.py`
+  re-scores the latest deep run's ~400 stocks on live data: ~30 NSE calls,
+  no per-stock Yahoo calls, **48 s for 400/400** on a real run. Served
+  through `POST /internal/refresh` (same bearer token as `/internal/run`),
+  and `/api/latest` returns it with `live.as_of`. It is skipped while a deep
+  run is active, and only one refresh runs at a time. Lab CronJob
+  `stockradar-live-refresh` runs `*/5` from 09:00 to 15:55 IST, Mon–Fri.
+  `combine_factor_scores()` and `_price_and_technical_fields()` are now
+  shared by the deep run and the refresh; both were checked identical to the
+  old code on 500 random inputs. Results gain `is_disqualified` and
+  `price_as_of`. The dashboard adds a "Live · NSE <time>" badge, the deep
+  run's own time, per-stock "Price as of", and labels delivery % as
+  previous session. `_verify_security.py` 62/62 (12 new).
+- **CLAUDE.md data-freshness re-audit** (`554aa78`): describes the two
+  speeds, how the live bar is dated, the three NSE live sources and what
+  stays EOD-only. Audit defect #5 (NSE timestamps discarded) marked fixed.
+
+### <a id="dn-29"></a>DN-29 — Date the live bar by NSE's timestamp; keep it out of `raw_ohlcv`
+The bar is dated by NSE's own `lastUpdateTime` / response timestamp, not the
+server clock. A wall-clock date would append a phantom bar after the close
+or on a holiday, adding a session that never traded to every indicator
+window. Spliced frames carry `attrs["live_bar"]`, and `_store_ohlcv` drops
+that row because it is an unfinished session: storing it would feed a
+partial close into the forward-return labels behind `/api/factor-ic`.
+
+### <a id="dn-30"></a>DN-30 — Refresh re-scores only the price-driven factors
+The refresh recomputes price, every technical indicator, the technical
+factor, the regime multiplier, final score/signal and stop-loss/target. It
+keeps the fundamental, institutional, sentiment, sector and risk factors
+from the deep run. Those inputs don't change intraday (fundamentals are
+quarterly, FII/DII and delivery are EOD), and re-fetching them would mean
+per-stock Yahoo / Screener / news calls every 5 minutes — the thing that
+makes a deep run take 8–27 minutes. Sharing `combine_factor_scores()`
+between both paths keeps them from drifting apart, so a refreshed score is
+comparable to a deep-run score.
+
+### <a id="dn-31"></a>DN-31 — Separate `live_snapshot`, never `runs`; 404 while untokened
+The refresh overwrites a single-row `live_snapshot` table and never writes
+`runs` or `raw_ohlcv`. That keeps run history one row per deep run (84 a
+day would swamp `/api/history` and the score-history labels). The route
+reuses `INTERNAL_TRIGGER_TOKEN` and 404s while it is unset, so the live VM,
+which doesn't set it, is unaffected until the k8s cutover. Only the lab
+runs the refresh.
+
+### Open
+- Lab pinned to `ec6b9d0` (committed 2026-10-30). Whether the lab is
+  actually running it hasn't been verified; check that the first
+  `stockradar-live-refresh` Jobs during market hours produce a
+  `live_snapshot`.
+- Audit defects #2 (`company_name == symbol`, `industry == "Unknown"`) and
+  #3 (`raw_ohlcv` 100% Yahoo) are still open.
+- Carried over: region move + billing upgrade before 2027-01-23; k8s plan
+  next step is a shared run lock; lab VM `stockradar-k8s` still running.
 
 ---
 
