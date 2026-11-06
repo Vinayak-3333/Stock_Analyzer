@@ -135,6 +135,8 @@ then cleared four small carried-over items.
   branch; kept it one-sided rather than invent a new rule in a bug fix.
 
 ### Open
+- Lab pinned to `6327c3e` in `f1d3fc6` (CI build green, 2m8s). Applied
+  with `kubectl apply -k deploy/k8s/lab` once the pin was on `alt-approach`.
 - **Every score moves** on the next deep run (the sector factor is 10%,
   and it was +15 for everyone). Verify on the lab: sector factors spread
   instead of all 65; the `Sector beat/lagged NIFTY` reasons appear; no
