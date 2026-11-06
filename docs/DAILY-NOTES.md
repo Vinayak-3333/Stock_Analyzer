@@ -167,7 +167,7 @@ then cleared four small carried-over items.
 
 ### Open
 - Lab pinned to `6327c3e` in `f1d3fc6`, then to `900d039` (stocksTraded fix) after
-  the check run crashed. Applied
+  the check run crashed, then to `972bc3f` (broad indices neutral). Applied
   with `kubectl apply -k deploy/k8s/lab` once the pin was on `alt-approach`.
 - Option: derive a sector index from NSE's `sector` field for the ~270 of
   400 stocks with no real sector index (they're neutral today).
