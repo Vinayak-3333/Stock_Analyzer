@@ -38,6 +38,6 @@ resources:
 #     ghcr.io/vinayak-3333/stock-analyzer-frontend:<sha>
 images:
   - name: ghcr.io/vinayak-3333/stock-analyzer-backend
-    newTag: 6327c3e307f6801850780228e9a96dbace9ad724
+    newTag: 900d039bd5efeaa599593c4e29156db6937bc197
   - name: ghcr.io/vinayak-3333/stock-analyzer-frontend
-    newTag: 6327c3e307f6801850780228e9a96dbace9ad724
+    newTag: 900d039bd5efeaa599593c4e29156db6937bc197
