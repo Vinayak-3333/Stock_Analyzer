@@ -55,6 +55,95 @@ future you) can pick up without re-deriving context.
 | [DN-33](#dn-33) | 2026-10-30 | Sector keyword rules match whole words over the full NSE classification |
 | [DN-34](#dn-34) | 2026-10-30 | `raw_ohlcv` stays Yahoo; labels take NSE's bhavcopy first, gap-filled each run |
 | [DN-35](#dn-35) | 2026-10-30 | Date bhavcopy rows by the file's `DATE1`, never the URL |
+| [DN-36](#dn-36) | 2026-11-06 | Sector factor: per-stock sector-index momentum vs NIFTY; crude/rupee rules keyed on the regime's trend strings |
+
+---
+
+## 2026-11-06
+
+Fixed the sector factor, which run 7 showed was a constant (every stock 65.0),
+then cleared four small carried-over items.
+
+### Shipped
+- **Momentum is now per stock.** `regime.py` emits `index_change_1m`
+  (every NSE index's 1-month % change from `allIndices`, `last` vs
+  `oneMonthAgoVal`, NSE's `perChange30d` as fallback). Tier 2 carries each
+  stock's `sector_index` (already fetched by `getSymbolData`, previously
+  dropped) into the quote, and `pipeline._sector_momentum` gives the
+  sector index's 1-month return minus NIFTY 50's, in percentage points.
+  No sectoral index, or NSE down → `None` → neutral.
+- **Crude:** `sector_score` now reads `'RISING'` / `'FALLING'` instead of
+  comparing the string to `1` / `-1`.
+- **Rupee:** reads `usdinr_trend` (`'WEAKENING'` → exporters +5, importers
+  −5) instead of the never-emitted `usdinr_regime`.
+- The ±7 momentum steps and the falling-crude / importer rules now add a
+  reason, so the dashboard shows why a sector score moved.
+- `index_change_1m` is kept out of the `r_*` features and out of the
+  market payload stored with each run (~100 indices, scoring-only).
+
+**Cleanups**
+- Dropped the unused `sector_1m_return` read from `sector_score`.
+- `store.py`'s fallback composite: sector part is now a plain neutral 50.
+  It was the all-sector 1-day average — market mood, the same for every
+  stock, already covered by the regime multiplier — and was the value
+  mis-fed to the scorer as momentum. Only used when `final_score` is
+  missing.
+- **Lake schema: removed the 7 tables nothing writes** (`raw_options`,
+  `raw_news`, `raw_macro`, `raw_fundamentals`, `feature_snapshots`,
+  `backtest_runs`, `alert_history`) and their 3 indexes, per DN-08.
+  Re-grepped first: no reader or writer anywhere. **No `DROP`** —
+  existing lakes keep the empty tables; dropping blind on the lab / VM
+  lakes, which can't be inspected from here, wasn't worth the risk.
+  `raw_options_summary` stays: the 10-26 note called it never-written, but
+  `nse.run_full_collection()` (the module's manual CLI) does write it;
+  scheduled runs don't. Commented as such.
+- README architecture diagram: lake box lists the real tables; collector
+  box no longer names the four collectors deleted on 10-24.
+- **`.gitattributes`** (`* text=auto eol=lf`, `.bat`/`.cmd` CRLF). The
+  index was already all LF; four files (`Analyzer.py`, `CLAUDE.md`,
+  `nse.py`, `institutional.py`) showed 3,000+ changed lines that were
+  pure CRLF from a Windows save (diff ignoring CR: empty). Stripped the
+  CRs, and git now normalises on commit regardless of editor.
+
+### Found
+- **The constant had a fourth cause, worse than the three listed on
+  10-30.** `market_for_score["sector_momentum"]` was `features["sector_score"]`,
+  the *0–100 score* `store.py` makes (`50 + avg × 5`), not a % change. The
+  rule's `> 3` was therefore always true: +15 for every stock, every run
+  (50 + 15 = 65, the run-7 value). The all-sector average was never the
+  bug that mattered.
+- Verified with a stdlib harness over the real functions (no deps or NSE
+  on this machine): IT with a sector +3.8pp ahead of NIFTY, rising crude and
+  a weakening rupee → 75; a bank whose sector lags 3.8pp → 35; auto with
+  rising crude → 39; refiner with a weakening rupee → 45; "Capital Markets"
+  no longer matches the IT rule → 50.
+
+### Decisions
+#### <a id="dn-36"></a>DN-36 — Sector factor: own sector index vs NIFTY; trend strings drive crude/rupee
+- **Momentum = sector index 1-month return − NIFTY 50's.** The rule's
+  thresholds (±1, ±3) suit a relative monthly return; a 1-day change
+  would be noise, and an absolute return would just repeat the market
+  regime the multiplier already applies. Source is `allIndices`, which the
+  regime already fetches every run, so this costs no extra call. Stocks
+  whose `pdSectorInd` is blank or `NIFTY 50` get neutral, not a guess.
+- **Crude trend stands in for the price level.** The rules were written
+  for crude above 90 / below 70; the regime gives the 1-month direction
+  (±5%). Used the direction rather than adding a level: what moves Indian
+  input costs and sentiment is the change, and the 90/70 dollar levels
+  date from a different price range. Revisit if a level rule is wanted.
+- **No `STRENGTHENING` rupee rule** — the original had only the weak-rupee
+  branch; kept it one-sided rather than invent a new rule in a bug fix.
+
+### Open
+- **Every score moves** on the next deep run (the sector factor is 10%,
+  and it was +15 for everyone). Verify on the lab: sector factors spread
+  instead of all 65; the `Sector beat/lagged NIFTY` reasons appear; no
+  `allIndices gave no 1-month values` warning (the `oneMonthAgoVal` field
+  name is from NSE's documented row, not re-probed today — no Python deps
+  on this machine).
+- The seven removed tables still exist, empty, in the lab and live-VM
+  lakes. Drop them by hand if wanted (`DROP TABLE IF EXISTS …`) after
+  checking they're empty.
 
 ---
 
@@ -651,7 +740,7 @@ live data). The window fills over the first 3 trading days after deploy.
   US free region in the same step (keep the `stockradar` tailnet name so the
   URL survives). Doing it earlier gains nothing while credit pays.
 - **Account verification by 22 Feb 2027** — the user's action, in the console.
-- The 8 never-written lake tables: delete from the schema or wire them up.
+- ~~The 8 never-written lake tables~~ — 7 removed from the schema 2026-11-06; `raw_options_summary` kept (manual CLI writes it).
 
 ---
 

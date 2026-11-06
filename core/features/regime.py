@@ -179,6 +179,29 @@ def _fetch_live_indices() -> Dict[str, dict]:
         return {}
 
 
+def _index_1m_changes(live: Dict[str, dict]) -> Dict[str, float]:
+    """1-month % change of every NSE index, keyed by its NSE name.
+
+    `allIndices` carries the value one month ago next to `last`; NSE's own
+    `perChange30d` is the fallback. Feeds each stock's sector momentum
+    (its `sector_index` from `getSymbolData` against NIFTY 50).
+    """
+    out: Dict[str, float] = {}
+    for name, row in live.items():
+        try:
+            last, ago = float(row.get("last")), float(row.get("oneMonthAgoVal"))
+            if ago > 0:
+                out[name] = round((last / ago - 1) * 100, 2)
+                continue
+        except (TypeError, ValueError):
+            pass
+        try:
+            out[name] = round(float(row.get("perChange30d")), 2)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 def _live_sector_breadth(live: Dict[str, dict]) -> Optional[Dict[str, Optional[float]]]:
     """Live 1-day % change per sector from NSE, or None if NSE gave none."""
     out = {name: live.get(nse, {}).get("percentChange") for name, nse in _NSE_SECTOR_MAP.items()}
@@ -213,6 +236,8 @@ def compute_regime_features() -> Dict[str, Any]:
     us_market_trend               ``'BULLISH'`` | ``'NEUTRAL'`` | ``'BEARISH'``
     us_10y_yield                  US 10-year bond yield (%)
     sector_breadth                *dict* sector → 1-day % change
+    index_change_1m               *dict* NSE index name → 1-month % change
+                                  (live NSE only; {} when NSE is unreachable)
     computed_at                   ISO timestamp of computation
     ============================  ========================================
     """
@@ -321,6 +346,11 @@ def compute_regime_features() -> Dict[str, Any]:
         sector_breadth = _compute_sector_breadth()
         _set_cache("sector_breadth", sector_breadth)
 
+    # --- Every index's 1-month change (per-stock sector momentum) ---------
+    index_1m = _index_1m_changes(live)
+    if live and "NIFTY 50" not in index_1m:
+        logger.warning("NSE allIndices gave no 1-month values — sector momentum will be neutral")
+
     # --- Regime classification (rule-based) --------------------------------
     market_regime, regime_score = _classify_regime(
         nifty_5d=nifty_5d,
@@ -346,6 +376,7 @@ def compute_regime_features() -> Dict[str, Any]:
         "us_market_trend": us_trend,
         "us_10y_yield": us_10y,
         "sector_breadth": sector_breadth,
+        "index_change_1m": index_1m,
         "computed_at": datetime.now().isoformat(timespec="seconds"),
         # NSE's own clock for the live layer; None means NSE was unreachable
         # and every value above is from Yahoo's daily bars.

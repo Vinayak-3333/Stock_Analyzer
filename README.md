@@ -32,15 +32,14 @@ StockRadar IN scans up to **~2,000 NSE equities** every market day using a **two
                        │
 ┌──────────────────────▼──────────────────────────────────┐
 │               Collectors (core/collectors/)              │
-│  nse.py · market_data.py · global_data.py               │
-│  fundamentals.py · news.py                               │
+│  nse.py (fundamentals/news fetched in core/features/)   │
 └──────────────────────┬──────────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────────┐
 │               Data Lake (DuckDB)                         │
-│  raw_ohlcv · raw_delivery · raw_fii_dii · raw_news       │
-│  raw_macro · raw_options_summary · known_symbols         │
-│  fundamentals_cache (7-day TTL)                          │
+│  raw_ohlcv · raw_bhavcopy · raw_delivery · raw_fii_dii   │
+│  raw_options_summary · known_symbols · symbol_meta       │
+│  score_history · event_log · fundamentals_cache          │
 └──────────────────────┬──────────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────────┐

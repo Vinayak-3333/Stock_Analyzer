@@ -1,0 +1,9 @@
+# The repo stores LF. Development is on Windows and Linux; without this,
+# an editor saving CRLF shows the whole file as changed (2026-11-06: four
+# files, 3,000+ lines of pure line-ending churn). Git now normalises to LF
+# on commit whatever the editor writes.
+* text=auto eol=lf
+
+# Windows batch files need CRLF to run reliably under cmd.exe.
+*.bat text eol=crlf
+*.cmd text eol=crlf

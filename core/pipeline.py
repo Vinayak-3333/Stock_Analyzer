@@ -373,7 +373,8 @@ def _market_payload(regime: dict | None) -> dict:
         "vix_value": round(vix, 2) if vix is not None else None,
         "nifty_50_change": nifty_1d,
         "sector_changes": regime.get("sector_breadth") or {},
-        "regime": regime,
+        # index_change_1m is ~100 indices, only needed for scoring
+        "regime": {k: v for k, v in regime.items() if k != "index_change_1m"},
     }
 
 
@@ -405,7 +406,21 @@ def _technical_inputs(features: dict) -> dict:
     }
 
 
-def _score_inputs(features: dict, quote: dict, market: dict) -> tuple[dict, dict, dict, dict, dict, dict]:
+def _sector_momentum(quote: dict, regime: dict | None) -> float | None:
+    """
+    The stock's sector index 1-month return minus NIFTY 50's, in percentage
+    points — or None (neutral) when the stock has no sectoral index or NSE's
+    live indices were unavailable. Each stock gets its own sector's number;
+    the old input was the all-sector average, identical for every stock.
+    """
+    changes = (regime or {}).get("index_change_1m") or {}
+    index = quote.get("sector_index")
+    if not index or index == "NIFTY 50" or index not in changes or "NIFTY 50" not in changes:
+        return None
+    return round(changes[index] - changes["NIFTY 50"], 2)
+
+
+def _score_inputs(features: dict, quote: dict, market: dict, sector_momentum: float | None = None) -> tuple[dict, dict, dict, dict, dict, dict]:
     technical = _technical_inputs(features)
     fundamental = {
         "roe": features.get("f_roe"),
@@ -451,10 +466,12 @@ def _score_inputs(features: dict, quote: dict, market: dict) -> tuple[dict, dict
     market_for_score = {
         **market,
         "sector_changes": market.get("sector_changes") or {},
-        "sector_momentum": features.get("sector_score"),
+        # Not features["sector_score"]: that is a 0–100 score, which the
+        # rule read as a % momentum (always > 3, so +15 for every stock).
+        "sector_momentum": sector_momentum,
         "breadth_pct": features.get("r_breadth_pct"),
         "crude_regime": features.get("r_crude_regime"),
-        "usdinr_regime": features.get("r_usdinr_regime"),
+        "usdinr_trend": features.get("r_usdinr_trend"),
     }
     return fundamental, technical, institutional, sentiment, market_for_score, stock_meta
 
@@ -578,7 +595,9 @@ def analyse_symbol(symbol: str, quote: dict, nifty_df: pd.DataFrame | None, regi
         nse_session=session,
         company_name=quote.get("companyName") or symbol,
     )
-    fundamental, technical, institutional, sentiment, score_market, stock_meta = _score_inputs(features, quote, market)
+    fundamental, technical, institutional, sentiment, score_market, stock_meta = _score_inputs(
+        features, quote, market, _sector_momentum(quote, regime)
+    )
     score_result = calculate_final_score(
         fundamental=fundamental,
         technical=technical,
@@ -803,6 +822,7 @@ def run_modular_analysis(limit: int | None = None) -> list[dict]:
                 "industry":       meta.get("industry") or quotes.get(sym, {}).get("industry", ""),
                 "sector":         meta.get("sector") or "",
                 "basic_industry": meta.get("basic_industry") or "",
+                "sector_index":   meta.get("sector_index") or "",
             }
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
         futures = {

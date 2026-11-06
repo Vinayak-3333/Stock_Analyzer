@@ -99,23 +99,18 @@ def compute_all_features(
             result["regime_multiplier"] = get_regime_multiplier(regime)
             # Copy regime features with prefix
             for k, v in regime.items():
-                if k not in ("sector_breadth",):  # skip large dicts
+                if k not in ("sector_breadth", "index_change_1m"):  # skip large dicts
                     result[f"r_{k}"] = v
         except Exception as e:
             log.warning("Regime multiplier failed: %s", e)
 
     # ── Composite Score (weights shared with core.scoring.hybrid) ─────────────
-    # Sector score derived from regime sector data
+    # Sector is neutral here. The real sector factor needs the stock's NSE
+    # sector index, which only the pipeline has (hybrid.sector_score, DN-36);
+    # this composite is just the fallback when final_score is missing. The
+    # old value — the all-sector 1-day average — was market mood, the same
+    # for every stock, and was once mis-fed into the scorer as momentum.
     sector_score = 50.0
-    if regime and regime.get("sector_breadth"):
-        sector_values = [
-            float(v)
-            for v in regime["sector_breadth"].values()
-            if v is not None and pd.notna(v)
-        ]
-        if sector_values:
-            avg_sector = sum(sector_values) / len(sector_values)
-            sector_score = max(0, min(100, 50 + avg_sector * 5))
 
     # Risk score derived from fundamental filters
     risk_score = 50.0

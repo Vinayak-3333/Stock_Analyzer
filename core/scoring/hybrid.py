@@ -328,22 +328,26 @@ _SECTOR_IMPORTERS   = re.compile(r"\b(Oil|Import\w*|Refin\w*)\b", re.I)
 def sector_score(market: dict, symbol_sector: str = "") -> tuple[float, list[str]]:
     """
     Score based on: sector momentum, market breadth, crude/USD impact.
+
+    `sector_momentum` is the stock's sector index 1-month return minus NIFTY
+    50's, in percentage points (None = no sector index → neutral).
+    `crude_regime` / `usdinr_trend` are the strings `regime.py` emits —
+    'RISING'/'STABLE'/'FALLING' and 'STRENGTHENING'/'WEAKENING'/'STABLE'.
     """
     score = 50.0
     reasons = []
 
-    sector_momentum = _safe(market.get("sector_momentum"))
+    sector_momentum = _safe(market.get("sector_momentum"))  # pp vs NIFTY, 1 month
     breadth_pct     = _safe(market.get("breadth_pct"), 50)   # % NIFTY stocks above 200 SMA
-    crude_regime    = _safe(market.get("crude_regime"))
-    usdinr_regime   = _safe(market.get("usdinr_regime"))
-    sector_return   = _safe(market.get("sector_1m_return"))   # sector vs NIFTY
+    crude_regime    = str(market.get("crude_regime") or "STABLE").upper()
+    usdinr_trend    = str(market.get("usdinr_trend") or "STABLE").upper()
 
     # Sector momentum (how sector is doing vs market)
-    if sector_momentum > 3:    score += 15; reasons.append(f"+15: Sector momentum +{sector_momentum:.1f}%")
-    elif sector_momentum > 1:  score += 7
+    if sector_momentum > 3:    score += 15; reasons.append(f"+15: Sector beat NIFTY by {sector_momentum:.1f}pp (1m)")
+    elif sector_momentum > 1:  score += 7;  reasons.append(f"+7: Sector beat NIFTY by {sector_momentum:.1f}pp (1m)")
     elif sector_momentum > 0:  score += 3
-    elif sector_momentum < -3: score -= 15; reasons.append(f"-15: Sector weakening {sector_momentum:.1f}%")
-    elif sector_momentum < -1: score -= 7
+    elif sector_momentum < -3: score -= 15; reasons.append(f"-15: Sector lagged NIFTY by {-sector_momentum:.1f}pp (1m)")
+    elif sector_momentum < -1: score -= 7;  reasons.append(f"-7: Sector lagged NIFTY by {-sector_momentum:.1f}pp (1m)")
     elif sector_momentum < 0:  score -= 3
 
     # Market breadth
@@ -352,22 +356,25 @@ def sector_score(market: dict, symbol_sector: str = "") -> tuple[float, list[str
     elif breadth_pct < 30:  score -= 10; reasons.append(f"-10: Weak breadth — only {breadth_pct:.0f}% above 200SMA")
     elif breadth_pct < 45:  score -= 5
 
-    # Crude oil impact (IT/Pharma benefit from low crude; Auto/FMCG hurt by high crude)
-    if crude_regime == 1:   # high crude (>90)
+    # Crude oil impact. The rules were written for price levels (>90 / <70);
+    # the regime gives the 1-month direction (±5%), so the trend stands in:
+    # RISING takes the high-crude branch, FALLING the low-crude one (DN-36).
+    if crude_regime == "RISING":
         if _SECTOR_IT_PHARMA.search(symbol_sector):
-            score += 5; reasons.append("+5: IT/Pharma less affected by crude")
+            score += 5; reasons.append("+5: IT/Pharma less affected by rising crude")
         elif _SECTOR_CRUDE_USERS.search(symbol_sector):
-            score -= 8; reasons.append("-8: Sector hurt by high crude oil")
-    elif crude_regime == -1:  # low crude (<70)
+            score -= 8; reasons.append("-8: Sector hurt by rising crude oil")
+    elif crude_regime == "FALLING":
         if _SECTOR_CHEAP_CRUDE.search(symbol_sector):
-            score += 5
+            score += 5; reasons.append("+5: Sector helped by falling crude oil")
 
-    # USD/INR impact — strong rupee helps importers
-    if usdinr_regime == 1:   # weak rupee (>85)
+    # USD/INR impact — a weakening rupee (USD/INR up >0.5% in a month)
+    # helps exporters and hurts importers
+    if usdinr_trend == "WEAKENING":
         if _SECTOR_EXPORTERS.search(symbol_sector):
-            score += 5; reasons.append("+5: Weak rupee boosts IT/Pharma exports")
+            score += 5; reasons.append("+5: Weakening rupee boosts IT/Pharma exports")
         elif _SECTOR_IMPORTERS.search(symbol_sector):
-            score -= 5
+            score -= 5; reasons.append("-5: Weakening rupee raises import costs")
 
     return _clamp(score), reasons
 
