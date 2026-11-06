@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import random
+import re
 import time
 import warnings
 from datetime import datetime
@@ -406,6 +407,15 @@ def _technical_inputs(features: dict) -> dict:
     }
 
 
+# Broad / size indices are not sectors. NSE gives ~20% of the shortlist
+# `NIFTY 500` as its "sector index"; against NIFTY 50 that measures mid and
+# small caps vs large caps, the same number for all of them (run 10: 82
+# stocks at -15). Those stocks get neutral, like the ones with no index.
+_BROAD_INDEX = re.compile(
+    r"^NIFTY (50|100|200|500|NEXT 50|TOTAL MARKET|LARGE ?MID.*|MID.*|SMALL.*|SML.*|MICRO.*)$"
+)
+
+
 def _sector_momentum(quote: dict, regime: dict | None) -> float | None:
     """
     The stock's sector index 1-month return minus NIFTY 50's, in percentage
@@ -415,7 +425,7 @@ def _sector_momentum(quote: dict, regime: dict | None) -> float | None:
     """
     changes = (regime or {}).get("index_change_1m") or {}
     index = quote.get("sector_index")
-    if not index or index == "NIFTY 50" or index not in changes or "NIFTY 50" not in changes:
+    if not index or _BROAD_INDEX.match(index) or index not in changes or "NIFTY 50" not in changes:
         return None
     return round(changes[index] - changes["NIFTY 50"], 2)
 

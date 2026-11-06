@@ -350,6 +350,13 @@ def compute_regime_features() -> Dict[str, Any]:
     index_1m = _index_1m_changes(live)
     if live and "NIFTY 50" not in index_1m:
         logger.warning("NSE allIndices gave no 1-month values — sector momentum will be neutral")
+    elif index_1m:
+        logger.info(
+            "Index 1m change: NIFTY 50 %+.1f%% | %s",
+            index_1m["NIFTY 50"],
+            " ".join(f"{k.replace('NIFTY ', '')} {v:+.1f}" for k, v in sorted(index_1m.items())
+                     if k in _NSE_SECTOR_MAP.values() or k in ("NIFTY 500", "NIFTY PHARMA")),
+        )
 
     # --- Regime classification (rule-based) --------------------------------
     market_regime, regime_score = _classify_regime(

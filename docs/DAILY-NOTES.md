@@ -129,6 +129,22 @@ then cleared four small carried-over items.
   type. Same lesson as the 10-30 `meta` drop: NSE changes its payloads
   without notice.
 
+- **Lab run 10 (`sector-check-2`, on `900d039`) verified DN-36**: 400
+  results, sector factor now takes 6 values (35/43/47/50/57/65) instead
+  of a constant 65; 142 "Sector beat/lagged NIFTY" reasons in top-5 lists.
+  Per index: IT +7.2pp → 65, Metal −8.0, FMCG −4.5, Bank −3.2, Pharma −3.1
+  → 35; Infra / Fin Services / Auto at 47 (lagged 0–1pp). Every
+  `pdSectorInd` name matched an `allIndices` name — no mapping needed.
+  Crude and rupee were both STABLE, so those rules didn't fire.
+- **But 82 of 400 had `NIFTY 500` as their "sector index"** — a broad
+  index — and all got −15 (NIFTY 500 vs NIFTY 50 = mid/small vs large
+  caps). 191 had no index at all. Fixed: broad/size indices
+  (`NIFTY 50/100/200/500`, `NEXT 50`, `MIDCAP*`, `SMALLCAP*`, `MICROCAP*`,
+  `LARGEMIDCAP*`, `TOTAL MARKET`) count as no sector → neutral. The run
+  also now logs `Index 1m change: …` once, to see the raw numbers (NIFTY
+  500 and PHARMA both showed −3.1pp in run 10 — probably coincidence,
+  the log will tell).
+
 ### Decisions
 #### <a id="dn-36"></a>DN-36 — Sector factor: own sector index vs NIFTY; trend strings drive crude/rupee
 - **Momentum = sector index 1-month return − NIFTY 50's.** The rule's
@@ -142,6 +158,10 @@ then cleared four small carried-over items.
   (±5%). Used the direction rather than adding a level: what moves Indian
   input costs and sentiment is the change, and the 90/70 dollar levels
   date from a different price range. Revisit if a level rule is wanted.
+- **Broad indices are "no sector", not a size signal** (user's call,
+  2026-11-06). Rejected for now: deriving a sector index from NSE's
+  `sector` field for the ~270 stocks with none — a bigger change to the
+  scores, would need a mapping table reviewed first. Stays open.
 - **No `STRENGTHENING` rupee rule** — the original had only the weak-rupee
   branch; kept it one-sided rather than invent a new rule in a bug fix.
 
@@ -149,6 +169,8 @@ then cleared four small carried-over items.
 - Lab pinned to `6327c3e` in `f1d3fc6`, then to `900d039` (stocksTraded fix) after
   the check run crashed. Applied
   with `kubectl apply -k deploy/k8s/lab` once the pin was on `alt-approach`.
+- Option: derive a sector index from NSE's `sector` field for the ~270 of
+  400 stocks with no real sector index (they're neutral today).
 - **Every score moves** on the next deep run (the sector factor is 10%,
   and it was +15 for everyone). Verify on the lab: sector factors spread
   instead of all 65; the `Sector beat/lagged NIFTY` reasons appear; no
