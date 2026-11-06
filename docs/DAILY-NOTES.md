@@ -145,6 +145,15 @@ then cleared four small carried-over items.
   500 and PHARMA both showed −3.1pp in run 10 — probably coincidence,
   the log will tell).
 
+- **Lab run 11 (`sector-check-3`, on `972bc3f`) verified the broad-index
+  fix**: all 85 `NIFTY 500` stocks now 50 (were 35); real sectors
+  unchanged. Run took ~3 min, prices NSE-only (764 index + 1,050
+  traded). `Index 1m change: NIFTY 50 +8.8% | 500 +5.7 AUTO +8.6 BANK
+  +5.6 FMCG +4.2 IT +16.0 METAL +0.8 PHARMA +5.7`. The 500/Pharma tie is
+  a coincidence: raw `last`/`oneMonthAgoVal` differ (23224.7/21971.6 vs
+  27607.6/26117.1 → 5.70 vs 5.71, matching NSE's `perChange30d`). This
+  also confirms `oneMonthAgoVal` is the live field name.
+
 ### Decisions
 #### <a id="dn-36"></a>DN-36 — Sector factor: own sector index vs NIFTY; trend strings drive crude/rupee
 - **Momentum = sector index 1-month return − NIFTY 50's.** The rule's
@@ -174,9 +183,7 @@ then cleared four small carried-over items.
 - **Every score moves** on the next deep run (the sector factor is 10%,
   and it was +15 for everyone). Verify on the lab: sector factors spread
   instead of all 65; the `Sector beat/lagged NIFTY` reasons appear; no
-  `allIndices gave no 1-month values` warning (the `oneMonthAgoVal` field
-  name is from NSE's documented row, not re-probed today — no Python deps
-  on this machine).
+  `allIndices gave no 1-month values` warning. **Done** — runs 10/11.
 - The seven removed tables still exist, empty, in the lab and live-VM
   lakes. Drop them by hand if wanted (`DROP TABLE IF EXISTS …`) after
   checking they're empty.
