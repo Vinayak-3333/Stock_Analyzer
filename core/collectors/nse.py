@@ -292,6 +292,23 @@ def collect_all_quotes(session: requests.Session = None) -> dict:
 _TRADED_SERIES = ("EQ", "BE")
 
 
+def _nse_number(value) -> Optional[float]:
+    """
+    A number from an NSE JSON field, or None. NSE sends some fields as
+    strings ("1,234.50", "-" for none) — `stocksTraded` switched its volume
+    to a string by 2026-11-06, and `"1.2" * 100_000` is string repetition,
+    so the whole run died in round(). Never trust the JSON type.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).replace(",", "").strip())
+    except ValueError:
+        return None
+
+
 def fetch_traded_quotes(session: requests.Session = None) -> dict:
     """
     Live price for every stock traded today, in one call — NSE's "Stocks
@@ -312,16 +329,17 @@ def fetch_traded_quotes(session: requests.Session = None) -> dict:
     quotes = {}
     for r in rows:
         sym, series = r.get("symbol"), r.get("series")
-        if not sym or series not in _TRADED_SERIES or not r.get("lastPrice"):
+        last_price = _nse_number(r.get("lastPrice"))
+        if not sym or series not in _TRADED_SERIES or not last_price:
             continue
         # A symbol listed in both series keeps its EQ row.
         if sym in quotes and series != "EQ":
             continue
-        volume_lakhs = r.get("totalTradedVolume")
+        volume_lakhs = _nse_number(r.get("totalTradedVolume"))
         quotes[sym] = {
-            "lastPrice":         r.get("lastPrice"),
-            "previousClose":     r.get("previousClose"),
-            "pChange":           r.get("pchange"),
+            "lastPrice":         last_price,
+            "previousClose":     _nse_number(r.get("previousClose")),
+            "pChange":           _nse_number(r.get("pchange")),
             "totalTradedVolume": round(volume_lakhs * 100_000) if volume_lakhs is not None else None,
             "index":             "NSE_TRADED",
             "as_of":             as_of,

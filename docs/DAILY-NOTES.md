@@ -118,6 +118,17 @@ then cleared four small carried-over items.
   rising crude → 39; refiner with a weakening rupee → 45; "Capital Markets"
   no longer matches the IT rule → 50.
 
+- **Lab check run `sector-check-1` (00:53 IST) crashed before scoring**:
+  `TypeError: type str doesn't define __round__ method` in
+  `fetch_traded_quotes`. NSE's `live-analysis-stocksTraded` now sends
+  `totalTradedVolume` as a **string**; `"1.2" * 100_000` is string
+  repetition, so `round()` failed and the whole run died after symbol
+  resolution. Not caused by DN-36 — any run would have hit it (the
+  intraday refresh too). Fixed with `_nse_number()`: every numeric field
+  of that feed is parsed (commas, `"-"`, strings), never trusted by JSON
+  type. Same lesson as the 10-30 `meta` drop: NSE changes its payloads
+  without notice.
+
 ### Decisions
 #### <a id="dn-36"></a>DN-36 — Sector factor: own sector index vs NIFTY; trend strings drive crude/rupee
 - **Momentum = sector index 1-month return − NIFTY 50's.** The rule's
